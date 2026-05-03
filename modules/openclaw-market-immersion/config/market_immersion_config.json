@@ -1,24 +1,24 @@
 {
   "version": 1,
   "timezone": "Asia/Shanghai",
-  "workspace_dir": "/home/lcxhh/.openclaw/workspace",
-  "output_dir": "/home/lcxhh/.openclaw/workspace/market-immersion",
-  "venv_python": "/home/lcxhh/.openclaw/workspace/.venv-mxskills/bin/python",
-  "openclaw_bin": "/home/lcxhh/.local/bin/openclaw",
-  "secrets_env": "/home/lcxhh/.openclaw/secrets/mx.env",
+  "workspace_dir": "~/.openclaw/workspace",
+  "output_dir": "~/.openclaw/workspace/market-immersion",
+  "venv_python": "~/.openclaw/workspace/.venv-mxskills/bin/python",
+  "openclaw_bin": "~/.local/bin/openclaw",
+  "secrets_env": "~/.openclaw/secrets/mx.env",
   "notion": {
-    "enabled": true,
-    "secrets_env": "/home/lcxhh/.openclaw/secrets/notion.env",
+    "enabled": false,
+    "secrets_env": "~/.openclaw/secrets/notion.env",
     "token_env": "NOTION_TOKEN",
     "parent_page_id_env": "NOTION_PARENT_PAGE_ID",
-    "parent_page_id": "3548c93dc6b480a5b6ebe997305a30ff",
+    "parent_page_id": "",
     "publish_smoke": false,
     "timeout": 120
   },
   "people_daily_deep_read": {
     "enabled": true,
     "base_url": "https://paper.people.com.cn/rmrb/pc",
-    "output_dir": "/home/lcxhh/.openclaw/workspace/people-daily-deep-read",
+    "output_dir": "~/.openclaw/workspace/people-daily-deep-read",
     "max_pages": 99,
     "crawl_delay_seconds": 120,
     "timeout": 120,
@@ -32,11 +32,11 @@
       "prompt_template_path": ""
     },
     "notion": {
-      "enabled": true,
-      "secrets_env": "/home/lcxhh/.openclaw/secrets/notion.env",
+      "enabled": false,
+      "secrets_env": "~/.openclaw/secrets/notion.env",
       "token_env": "NOTION_TOKEN",
-      "finance_page_id": "3558c93dc6b481f28d56f58edcda0aeb",
-      "people_daily_page_id": "3558c93dc6b481989a70ef3f07427a72",
+      "finance_page_id": "",
+      "people_daily_page_id": "",
       "timeout": 120
     }
   },
@@ -127,7 +127,7 @@
       {
         "id": "cls_all",
         "name": "财联社电报",
-        "rn": 100,
+        "rn": 50,
         "max_pages": 20
       }
     ],
@@ -157,16 +157,16 @@
         "max_pages": 20
       }
     ],
-    "require_complete_window": true
+    "require_complete_window": false
   },
   "mx_search_supplement": {
     "enabled": false,
     "enabled_for_smoke": true
   },
   "telegram": {
-    "enabled": true,
+    "enabled": false,
     "channel": "telegram",
-    "target": "7215741815",
+    "target": "",
     "account": "default",
     "send_mode": "link",
     "send_smoke": false,
