@@ -970,7 +970,7 @@ Report rules:
 - Do not mechanically include message publish time, title, or source inside整理正文. Include time only when the reported event time is itself part of the information.
 - Section 9 keeps the chronological raw message flow with source, publish time, title, type, URL when available, and full original content.
 - If the source pool is non-empty but OpenClaw整理 fails or returns empty organized sections, treat the run as failed and do not publish it as a successful report.
-- Formal runs should require complete feed windows. If a source errors or pagination cannot reach the beginning of the requested window, fail the run so the timer can retry instead of silently publishing an incomplete report.
+- Formal runs should attempt to cover the full requested feed window. If a source cannot page back far enough, publish only with an explicit coverage warning instead of silently implying completeness. Hard-fail only when core collection, OpenClaw整理, or enabled delivery steps fail.
 
 Default time windows:
 
@@ -1019,6 +1019,7 @@ systemctl --user enable --now openclaw-market-immersion-morning.timer
 systemctl --user enable --now openclaw-market-immersion-midday.timer
 systemctl --user enable --now openclaw-market-immersion-close.timer
 systemctl --user enable --now openclaw-market-immersion-night.timer
+systemctl --user enable --now openclaw-market-feed-snapshot.timer
 ```
 
 Verification:
