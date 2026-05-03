@@ -1,12 +1,27 @@
 # Local OpenClaw state and secrets
 .openclaw/
 **/.openclaw/
+.clawhub/
+.clawmetry-*.db
+.clawmetry-*.json
+state/
+memory/
+MEMORY.md
+HEARTBEAT.md
+IDENTITY.md
+SOUL.md
+USER.md
+TOOLS.md
+AGENTS.md
+DURABLE_TASK_PROTOCOL.md
+TASK_REPORTING_PROTOCOL.md
 *.token
 *.secret
 *.key
 *.pem
 .env
 .env.*
+secrets/
 
 # Logs and diagnostics
 *.log
@@ -24,9 +39,24 @@ node_modules/
 __pycache__/
 *.pyc
 .pytest_cache/
+.venv/
+.venv-*/
 
 # Local builds
 *.exe
+
+# Local/private workspace material; keep public code under modules/ and openclaw-telegram-wsl-setup/
+incoming_docs/
+invest/
+market-immersion-module/
+market-immersion/
+mx_data/
+people-daily-deep-read-preview/
+people-daily-policy-reading-zhihu.md
+people-daily-test-manifest.json
+scripts/
+skills/
+wechat-monitor/
 
 # Editor and OS files
 .vscode/
