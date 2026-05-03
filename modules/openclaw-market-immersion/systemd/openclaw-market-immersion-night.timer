@@ -2,9 +2,10 @@
 Description=Schedule OpenClaw Market Immersion night collection
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 22:10:00
+OnCalendar=*-*-* 22:10:00
 Persistent=true
 Unit=openclaw-market-immersion-night.service
 
 [Install]
 WantedBy=timers.target
+

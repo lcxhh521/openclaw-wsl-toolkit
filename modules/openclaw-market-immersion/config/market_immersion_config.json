@@ -28,7 +28,8 @@
       "agent": "main",
       "thinking": "medium",
       "timeout": 300,
-      "detailed_max_page_no": 4
+      "detailed_max_page_no": 4,
+      "prompt_template_path": ""
     },
     "notion": {
       "enabled": true,

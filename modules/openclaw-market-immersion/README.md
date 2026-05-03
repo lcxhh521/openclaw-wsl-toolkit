@@ -25,7 +25,7 @@
 
 1. systemd timer 到点触发对应 phase。
 2. 模块按时间窗口拉取多源 7x24 快讯流。
-3. 每个源必须扫到窗口起点，否则任务失败并等待重试。
+3. 模块会尽量让每个源扫到窗口起点；如果个别源历史窗口不足，会在质量提示里标记 coverage warning，而不是阻塞整份日报发布。
 4. OpenClaw 必须完成 1-8 栏轻整理，否则任务失败。
 5. 第 9 栏保留按时间顺序排列的完整原始消息流。
 6. 如果用户在配置里启用 Notion，正式阶段必须成功发布 Notion。
@@ -81,6 +81,45 @@ journalctl --user -u openclaw-market-immersion-morning.service -n 100 --no-pager
 - `--delay 120`：自动请求间隔，默认尊重人民网 robots 的 crawl-delay。
 - `--manifest PATH`：使用已抓取的 manifest 重新发布或测试。
 - `--dry-run`：只验证将要生成的 Notion 页面数量，不真正发布。
-- `--force`：归档旧日期页并重建，默认不会重复创建同一天页面。
+- `--force`：更新已有日期页内容，默认不会重复创建同一天页面。
 
-输出目录默认是 `~/.openclaw/workspace/people-daily-deep-read/YYYY-MM-DD/`，包含 `manifest.json`、PDF 原件、Markdown 归档，以及一个本地 HTML 对照页。正式发布时会调用 OpenClaw 为每篇深读文章生成逐段解析，Notion 子页采用“原文定位短摘 + 解析”的结构；完整正文保留官方原文入口和 PDF 版面对照。
+输出目录默认是 `~/.openclaw/workspace/people-daily-deep-read/YYYY-MM-DD/`，包含 `manifest.json`、PDF 原件、Markdown 归档，以及一个本地 HTML 对照页。正式发布时会调用 OpenClaw 为每篇深读文章生成逐段解析，Notion 子页采用“逐段原文 + 对应解析 + 全文深度解读”的结构，便于审计原文和解释之间的关系。
+
+具体解读 prompt 不随仓库发布。仓库内置的只是 JSON 输出契约和最低质量要求；如果启用人民日报深读，建议用户在本机填入自己的私有 prompt。
+
+### 配置自己的人民日报深读 prompt
+
+1. 在本机创建一个不提交到 GitHub 的 prompt 文件，例如：
+
+```bash
+mkdir -p ~/.openclaw/private-prompts
+nano ~/.openclaw/private-prompts/people_daily_analysis_prompt.md
+```
+
+2. prompt 可以写自己的解读方法，但必须要求模型输出下面的 JSON 结构：
+
+```json
+{
+  "paragraph_notes": [
+    {"excerpt": "段首短摘", "analysis": "该段解析"}
+  ],
+  "signal_analysis": ["可选：信号/语境分析"],
+  "policy_chain": ["可选：政策链路或观察点"],
+  "follow_up": ["可选：后续跟踪事项"],
+  "full_analysis": ["全文深度解读"]
+}
+```
+
+其中 `paragraph_notes` 的数量应与原文段落数量一致。
+
+3. 在 `config/market_immersion_config.json` 中配置私有 prompt 路径：
+
+```json
+"people_daily_deep_read": {
+  "analysis": {
+    "prompt_template_path": "~/.openclaw/private-prompts/people_daily_analysis_prompt.md"
+  }
+}
+```
+
+4. 确认 prompt 文件没有被放进仓库；如果使用 git 管理自己的配置，请把私有 prompt 路径加入 `.gitignore`。

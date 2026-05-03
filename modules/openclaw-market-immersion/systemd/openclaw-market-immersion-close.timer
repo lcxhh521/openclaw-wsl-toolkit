@@ -2,7 +2,7 @@
 Description=Schedule OpenClaw Market Immersion close collection
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 15:20:00
+OnCalendar=*-*-* 15:20:00
 Persistent=true
 Unit=openclaw-market-immersion-close.service
 

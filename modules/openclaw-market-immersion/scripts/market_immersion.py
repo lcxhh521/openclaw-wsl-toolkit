@@ -58,6 +58,10 @@ def safe_name(text: str) -> str:
     return name[:80] or "query"
 
 
+def normalize_ws(text: Any) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
 def now_local() -> dt.datetime:
     return dt.datetime.now().astimezone()
 
@@ -1895,18 +1899,44 @@ def notion_request(
         raise RuntimeError(f"Notion API {exc.code}: {details}") from exc
 
 
-def list_notion_child_pages(parent_page_id: str, token: str, timeout: int) -> list[dict[str, Any]]:
+def list_notion_children(block_id: str, token: str, timeout: int) -> list[dict[str, Any]]:
     children: list[dict[str, Any]] = []
     cursor = ""
     while True:
-        url = f"https://api.notion.com/v1/blocks/{parent_page_id}/children?page_size=100"
+        url = f"https://api.notion.com/v1/blocks/{block_id}/children?page_size=100"
         if cursor:
             url += "&start_cursor=" + cursor
         payload = notion_request(method="GET", url=url, token=token, timeout=timeout)
         children.extend(payload.get("results") or [])
         if not payload.get("has_more"):
-            return [child for child in children if child.get("type") == "child_page"]
+            return children
         cursor = payload.get("next_cursor") or ""
+
+
+def list_notion_child_pages(parent_page_id: str, token: str, timeout: int) -> list[dict[str, Any]]:
+    return [child for child in list_notion_children(parent_page_id, token, timeout) if child.get("type") == "child_page"]
+
+
+def replace_notion_page_children(page_id: str, token: str, blocks: list[dict[str, Any]], timeout: int) -> None:
+    for child in list_notion_children(page_id, token, timeout):
+        child_id = child.get("id")
+        if not child_id:
+            continue
+        notion_request(
+            method="PATCH",
+            url=f"https://api.notion.com/v1/blocks/{child_id}",
+            token=token,
+            timeout=timeout,
+            payload={"archived": True},
+        )
+    for i in range(0, len(blocks), 80):
+        notion_request(
+            method="PATCH",
+            url=f"https://api.notion.com/v1/blocks/{page_id}/children",
+            token=token,
+            timeout=timeout,
+            payload={"children": blocks[i : i + 80]},
+        )
 
 
 def find_notion_child_page_by_title(
@@ -1974,22 +2004,43 @@ def publish_notion_page(
         except json.JSONDecodeError:
             publication_state = {}
     existing_publication = publication_state.get(publication_key)
-    if isinstance(existing_publication, dict) and existing_publication.get("page_id"):
-        return {
-            "enabled": True,
-            "attempted": True,
-            "skipped_duplicate": True,
-            "reason": "publication key already has a Notion page",
-            "publication_key": publication_key,
-            "page_id": existing_publication.get("page_id"),
-            "url": existing_publication.get("url"),
-            "title": existing_publication.get("title"),
-        }
 
     markdown = report_path.read_text(encoding="utf-8")
     blocks = markdown_to_notion_blocks(markdown)
     timeout = int(notion.get("timeout") or 120)
     started = now_local().isoformat(timespec="seconds")
+    if isinstance(existing_publication, dict) and existing_publication.get("page_id"):
+        page_id = str(existing_publication.get("page_id"))
+        try:
+            replace_notion_page_children(page_id, token, blocks, timeout)
+            publication_state[publication_key] = {
+                **existing_publication,
+                "title": title,
+                "updated_at": now_local().isoformat(timespec="seconds"),
+                "report_path": str(report_path),
+            }
+            publication_state_path.write_text(
+                json.dumps(publication_state, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            return {
+                "enabled": True,
+                "attempted": True,
+                "updated_existing": True,
+                "publication_key": publication_key,
+                "page_id": page_id,
+                "url": existing_publication.get("url"),
+                "title": title,
+                "block_count": len(blocks),
+            }
+        except Exception as exc:
+            return {
+                "enabled": True,
+                "attempted": True,
+                "error": str(exc),
+                "publication_key": publication_key,
+                "page_id": page_id,
+            }
     existing_page = find_notion_child_page_by_title(
         parent_page_id=parent_page_id,
         token=token,
@@ -2127,20 +2178,36 @@ def deliver_report(
 
     started = now_local().isoformat(timespec="seconds")
     try:
-        completed = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             text=True,
-            capture_output=True,
-            timeout=int(telegram.get("timeout") or 120),
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
         )
+        try:
+            stdout, stderr = proc.communicate(timeout=int(telegram.get("timeout") or 120))
+        except subprocess.TimeoutExpired as exc:
+            try:
+                os.killpg(proc.pid, 9)
+            except Exception:
+                pass
+            stdout, stderr = proc.communicate()
+            return {
+                "enabled": True,
+                "attempted": True,
+                "started_at": started,
+                "exception": str(exc),
+                "stdout": stdout,
+                "stderr": stderr,
+            }
         return {
             "enabled": True,
             "attempted": True,
             "started_at": started,
-            "returncode": completed.returncode,
-            "stdout": completed.stdout,
-            "stderr": completed.stderr,
+            "returncode": proc.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
         }
     except Exception as exc:  # noqa: BLE001 - delivery is best effort
         return {
@@ -2196,13 +2263,17 @@ def main() -> int:
         "source": window_source,
     }
     day = started.strftime("%Y-%m-%d")
+    date_slug = started.strftime("%Y%m%d")
     stamp = started.strftime("%Y%m%d_%H%M%S")
-    run_slug = f"{stamp}_{args.phase}"
+    # Canonical daily phase output: one report/manifest per day+phase.
+    # Retries update the same files instead of creating a new markdown on every failed attempt.
+    run_slug = f"{date_slug}_{args.phase}"
+    attempt_slug = f"{stamp}_{args.phase}"
 
     daily_dir = output_root / "daily" / day
     raw_dir = daily_dir / "raw"
     stdout_dir = daily_dir / "stdout"
-    skill_output_dir = daily_dir / "skill-output" / run_slug
+    skill_output_dir = daily_dir / "skill-output" / attempt_slug
     for d in (daily_dir, raw_dir, stdout_dir, skill_output_dir):
         d.mkdir(parents=True, exist_ok=True)
 
@@ -2225,7 +2296,7 @@ def main() -> int:
         skill = query_def["skill"]
         base_query = query_def["query"]
         query = f"{window_prefix}{base_query}" if window_prefix else base_query
-        entry_slug = safe_name(f"{run_slug}_{query_id}")
+        entry_slug = safe_name(f"{attempt_slug}_{query_id}")
         stdout_path = stdout_dir / f"{entry_slug}.stdout.txt"
         stderr_path = stdout_dir / f"{entry_slug}.stderr.txt"
 
@@ -2302,6 +2373,8 @@ def main() -> int:
         "phase": args.phase,
         "phase_label": run_def["label"],
         "started_at": started_iso,
+        "run_slug": run_slug,
+        "attempt_slug": attempt_slug,
         "window": window,
         "config_path": str(config_path),
         "entries": entries,
@@ -2368,21 +2441,14 @@ def main() -> int:
         phase_label=run_def["label"],
         report_path=report_path,
     )
-    if notion_delivery.get("skipped_duplicate"):
-        delivery = {
-            "enabled": (config.get("telegram") or {}).get("enabled", False),
-            "attempted": False,
-            "reason": "duplicate Notion publication skipped",
-        }
-    else:
-        delivery = deliver_report(
-            config=config,
-            phase=args.phase,
-            phase_label=run_def["label"],
-            report_path=report_path,
-            manifest_path=manifest_path,
-            notion_url=notion_delivery.get("url"),
-        )
+    delivery = deliver_report(
+        config=config,
+        phase=args.phase,
+        phase_label=run_def["label"],
+        report_path=report_path,
+        manifest_path=manifest_path,
+        notion_url=notion_delivery.get("url"),
+    )
     manifest["notion"] = notion_delivery
     manifest["delivery"] = delivery
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")

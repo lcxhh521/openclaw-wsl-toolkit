@@ -2,9 +2,10 @@
 Description=Schedule OpenClaw Market Immersion midday collection
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 12:15:00
+OnCalendar=*-*-* 12:15:00
 Persistent=true
 Unit=openclaw-market-immersion-midday.service
 
 [Install]
 WantedBy=timers.target
+

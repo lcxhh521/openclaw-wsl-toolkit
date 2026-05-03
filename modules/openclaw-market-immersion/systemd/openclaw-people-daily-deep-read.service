@@ -4,7 +4,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/home/lcxhh/.openclaw/workspace/market-immersion-module
-ExecStart=/home/lcxhh/.openclaw/workspace/market-immersion-module/scripts/run_people_daily_deep_read.sh
+WorkingDirectory=%h/.openclaw/workspace/market-immersion-module
+ExecStart=%h/.openclaw/workspace/market-immersion-module/scripts/run_people_daily_deep_read.sh
 TimeoutStartSec=21600
 Restart=no

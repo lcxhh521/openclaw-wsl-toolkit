@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule OpenClaw Market Feed Snapshot retention
+
+[Timer]
+OnCalendar=*:00/30
+Persistent=true
+RandomizedDelaySec=60
+Unit=openclaw-market-feed-snapshot.service
+
+[Install]
+WantedBy=timers.target

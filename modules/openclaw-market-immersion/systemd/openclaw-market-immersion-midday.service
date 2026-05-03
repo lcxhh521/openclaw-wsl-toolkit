@@ -2,11 +2,12 @@
 Description=OpenClaw Market Immersion midday run
 After=network-online.target openclaw-gateway.service
 Wants=network-online.target
-StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
-Restart=no
+Restart=on-failure
+RestartSec=2min
+RestartPreventExitStatus=3
 WorkingDirectory=%h/.openclaw/workspace/market-immersion-module
 Environment=MARKET_IMMERSION_DIR=%h/.openclaw/workspace/market-immersion-module
 EnvironmentFile=%h/.openclaw/secrets/mx.env

@@ -74,6 +74,8 @@ def rich_text(text: str, href: str | None = None) -> list[dict[str, Any]]:
 def block(block_type: str, text: str = "", href: str | None = None) -> dict[str, Any]:
     if block_type == "child_page":
         return {"object": "block", "type": "child_page", "child_page": {"title": text[:180]}}
+    if block_type == "to_do":
+        return {"object": "block", "type": "to_do", "to_do": {"rich_text": rich_text(text, href), "checked": False}}
     if block_type.startswith("heading_"):
         return {"object": "block", "type": block_type, block_type: {"rich_text": rich_text(text, href)}}
     return {"object": "block", "type": block_type, block_type: {"rich_text": rich_text(text, href)}}
@@ -188,26 +190,40 @@ def deterministic_article_analysis(article: dict[str, Any]) -> dict[str, Any]:
     return {"paragraph_notes": paragraph_notes, "full_analysis": full, "source": "deterministic"}
 
 
-def build_openclaw_prompt(article: dict[str, Any]) -> str:
+DEFAULT_ANALYSIS_INSTRUCTIONS = """请填写你自己的《人民日报》/政策文本解读 prompt。
+
+公开仓库只提供工作流、Notion 结构和 JSON 输出契约；具体解读方法属于用户自己的策略资产，不应由仓库内置。
+
+输出必须是 JSON，不要输出 Markdown，不要复制原文全文。JSON 结构：
+{
+  "paragraph_notes": [
+    {"excerpt": "该段不超过24个汉字的段首定位短摘", "analysis": "这一段的解读"}
+  ],
+  "signal_analysis": ["可选：信号/语境分析"],
+  "policy_chain": ["可选：政策链路或观察点"],
+  "follow_up": ["可选：后续跟踪事项"],
+  "full_analysis": ["全文深度解读"]
+}
+
+最低要求：paragraph_notes 数量必须和原文段落数量一致；不要空泛套话；所有判断应能回到原文证据。
+"""
+
+
+def load_prompt_template(settings: dict[str, Any]) -> str:
+    template_path = str(settings.get("prompt_template_path") or "").strip()
+    if template_path:
+        path = Path(template_path).expanduser()
+        if not path.exists():
+            raise RuntimeError(f"People's Daily analysis prompt template not found: {path}")
+        return path.read_text(encoding="utf-8")
+    return str(settings.get("prompt_template") or DEFAULT_ANALYSIS_INSTRUCTIONS)
+
+
+def build_openclaw_prompt(article: dict[str, Any], settings: dict[str, Any] | None = None) -> str:
     paragraphs = [compact(p) for p in article.get("paragraphs") or [] if compact(p)]
     numbered = "\n".join(f"{i}. {p}" for i, p in enumerate(paragraphs, 1))
-    return f"""你是中文报刊深读分析助手。请对下面《人民日报》文章做逐段解读和全文深度解读。
-
-输出必须是 JSON，不要输出 Markdown，不要复制原文全文。
-JSON 结构：
-{{
-  "paragraph_notes": [
-    {{"excerpt": "该段不超过24个汉字的段首定位短摘", "analysis": "这一段的解读，80到180字"}}
-  ],
-  "full_analysis": ["全文深度解读段落，每段120到220字，共3到5段"]
-}}
-
-要求：
-1. paragraph_notes 数量必须和原文段落数量一致。
-2. excerpt 只放短定位，不要复制完整段落。
-3. analysis 要解释该段在全文中的功能、细节和论证推进。
-4. full_analysis 要覆盖核心命题、论证链条、关键细节、隐含语义和对照阅读价值。
-5. 不要写空泛表扬，不要做原文没有支撑的宏大判断。
+    instructions = load_prompt_template(settings or {})
+    return f"""{instructions}
 
 标题：{article.get("title") or ""}
 版面：{page_label_for(article)}
@@ -247,8 +263,9 @@ def openclaw_article_analysis(
     thinking: str,
     timeout: int,
     session_prefix: str,
+    settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    prompt = build_openclaw_prompt(article)
+    prompt = build_openclaw_prompt(article, settings or {})
     session_id = f"{session_prefix}-{article.get('id') or int(time.time())}"
     cmd = [
         str(openclaw_bin),
@@ -296,7 +313,20 @@ def analyze_article(article: dict[str, Any], settings: dict[str, Any], issue_key
         thinking=str(settings.get("thinking") or "medium"),
         timeout=int(settings.get("timeout") or 300),
         session_prefix=f"people-daily-{issue_key}",
+        settings=settings,
     )
+
+
+def append_text_blocks(blocks: list[dict[str, Any]], block_type: str, prefix: str, text: str) -> None:
+    value = compact(text)
+    if not value:
+        return
+    # Notion rich_text content is capped at 2000 chars. Keep paragraph text visible by splitting.
+    max_len = max(200, 1900 - len(prefix))
+    for start in range(0, len(value), max_len):
+        chunk = value[start : start + max_len]
+        chunk_prefix = prefix if start == 0 else "原文续："
+        blocks.append(block(block_type, f"{chunk_prefix}{chunk}"))
 
 
 def build_article_page_blocks(article: dict[str, Any], analysis: dict[str, Any]) -> list[dict[str, Any]]:
@@ -305,7 +335,7 @@ def build_article_page_blocks(article: dict[str, Any], analysis: dict[str, Any])
         block("bulleted_list_item", f"版面：{page_label_for(article)}"),
         block("bulleted_list_item", "官方原文", str(article.get("url") or "")),
         block("bulleted_list_item", f"正文规模：约 {article.get('char_count') or 0} 字"),
-        block("heading_1", "逐段解读"),
+        block("heading_1", "逐段对照解读"),
     ]
     notes = list(analysis.get("paragraph_notes") or [])
     paragraphs = [compact(p) for p in article.get("paragraphs") or [] if compact(p)]
@@ -317,12 +347,26 @@ def build_article_page_blocks(article: dict[str, Any], analysis: dict[str, Any])
             explanation = deterministic_article_analysis({"title": article.get("title"), "paragraphs": [paragraph]})[
                 "paragraph_notes"
             ][0]["analysis"]
-        blocks.append(block("heading_3", f"第{index}段"))
-        blocks.append(block("quote", f"原文定位：{excerpt}"))
-        blocks.append(block("paragraph", f"解析：{explanation}"))
+        append_text_blocks(blocks, "quote", "原文：", paragraph)
+        append_text_blocks(blocks, "paragraph", "解析：", explanation)
+    signal_lines = [compact(line) for line in analysis.get("signal_analysis") or [] if compact(line)]
+    if signal_lines:
+        blocks.append(block("heading_1", "政治/政策信号"))
+        for line in signal_lines:
+            append_text_blocks(blocks, "paragraph", "", line)
+    chain_lines = [compact(line) for line in analysis.get("policy_chain") or [] if compact(line)]
+    if chain_lines:
+        blocks.append(block("heading_1", "政策链路与观察点"))
+        for line in chain_lines:
+            append_text_blocks(blocks, "bulleted_list_item", "", line)
+    follow_lines = [compact(line) for line in analysis.get("follow_up") or [] if compact(line)]
+    if follow_lines:
+        blocks.append(block("heading_1", "后续验证清单"))
+        for line in follow_lines:
+            append_text_blocks(blocks, "to_do", "", line)
     blocks.append(block("heading_1", "全文深度解读"))
     for line in analysis.get("full_analysis") or deterministic_article_analysis(article)["full_analysis"]:
-        blocks.append(block("paragraph", compact(line)))
+        append_text_blocks(blocks, "paragraph", "", compact(line))
     return blocks
 
 
@@ -336,8 +380,12 @@ def build_date_page_blocks(
         block("heading_1", "全日总览"),
         block(
             "paragraph",
-            "本页按人民日报电子版归档：PDF保留版面原貌，正文通过官方原文入口进入；前4版文章在各自条目下方放置逐篇深读子页。",
+            "本页按人民日报电子版归档：PDF保留版面原貌，正文通过官方原文入口进入；前4版文章在各自条目下方放置逐篇深读子页。阅读重点不是摘要，而是版面信号、主体排序、政策链路、图像/版式暗示和后续验证。",
         ),
+        block("heading_1", "今日版面信号观察"),
+        block("bulleted_list_item", "先看版面顺序和组合：头版负责定调，后续版面常承担展开、经验推广、执行动员、国际叙事或评论功能。"),
+        block("bulleted_list_item", "重点看同一主题是否跨版重复出现；重复通常意味着政策优先级、宣传动员或治理压力。"),
+        block("bulleted_list_item", "图片和版式需要补读：人物、场景、设备、群众、边疆/基层/工厂/港口等视觉主体，可能承担文字之外的政治信号。"),
         block("heading_1", "全日PDF"),
     ]
     for page in manifest.get("pages") or []:
@@ -385,6 +433,20 @@ def append_children(page_id: str, token: str, blocks: list[dict[str, Any]], time
             url=f"https://api.notion.com/v1/blocks/{page_id}/children",
             token=token,
             payload={"children": part},
+            timeout=timeout,
+        )
+
+
+def clear_children(page_id: str, token: str, timeout: int) -> None:
+    for child in list_page_children(page_id, token, timeout):
+        child_id = child.get("id")
+        if not child_id:
+            continue
+        notion_request(
+            method="PATCH",
+            url=f"https://api.notion.com/v1/blocks/{child_id}",
+            token=token,
+            payload={"archived": True},
             timeout=timeout,
         )
 
@@ -521,7 +583,7 @@ def publish_to_notion(
 
     timeout = int(notion_config.get("timeout") or 120)
     title = format_issue_title(issue_date)
-    notion_existing = None if existing else find_existing_child_page(
+    notion_existing = find_existing_child_page(
         parent_page_id=parent_page_id,
         token=token,
         title=title,
@@ -552,22 +614,28 @@ def publish_to_notion(
 
     blocks = build_date_page_blocks(manifest=manifest, detailed=detailed, detailed_title_by_url=title_by_url)
 
+    existing_page_id = ""
+    existing_url = ""
     if force and existing and existing.get("page_id"):
-        notion_request(
-            method="PATCH",
-            url=f"https://api.notion.com/v1/pages/{existing['page_id']}",
+        existing_page_id = str(existing.get("page_id") or "")
+        existing_url = str(existing.get("url") or "")
+    elif force and notion_existing and notion_existing.get("id"):
+        existing_page_id = str(notion_existing.get("id") or "")
+        existing_url = str(notion_existing.get("url") or "")
+
+    if existing_page_id:
+        clear_children(existing_page_id, token, timeout)
+        append_children(existing_page_id, token, blocks, timeout)
+        page = {"id": existing_page_id, "url": existing_url}
+    else:
+        page = create_date_page(
+            parent_page_id=parent_page_id,
             token=token,
-            payload={"archived": True},
+            title=title,
+            blocks=blocks,
             timeout=timeout,
         )
 
-    page = create_date_page(
-        parent_page_id=parent_page_id,
-        token=token,
-        title=title,
-        blocks=blocks,
-        timeout=timeout,
-    )
     filled = fill_article_pages(
         date_page_id=page["id"],
         token=token,
@@ -581,9 +649,10 @@ def publish_to_notion(
         "url": page.get("url"),
         "published_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
         "detailed_pages": len(filled),
+        "updated_existing": bool(existing_page_id),
     }
     save_publication_state(state_path, state)
-    return {"enabled": True, "attempted": True, "page_id": page["id"], "url": page.get("url"), "detailed_pages": len(filled)}
+    return {"enabled": True, "attempted": True, "page_id": page["id"], "url": page.get("url"), "detailed_pages": len(filled), "updated_existing": bool(existing_page_id)}
 
 
 def collect_or_load_manifest(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
