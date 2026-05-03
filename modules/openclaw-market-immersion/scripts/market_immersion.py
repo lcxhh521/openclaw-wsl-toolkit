@@ -613,32 +613,44 @@ def collect_eastmoney_feed_entry(
         name = str(feed.get("name") or "东方财富7x24快讯")
         source_coverage = begin_coverage(
             name,
-            "东方财富移动页快讯接口按 column/p/limit 分页拉取，直到最旧消息早于本次窗口起点。",
+            "东方财富官网快讯接口按 fastColumn/sortEnd 游标拉取，直到最旧消息早于本次窗口起点。",
         )
         column = str(feed.get("column") or feed.get("type") or "102")
         limit = int(feed.get("limit") or 50)
         max_pages_feed = effective_max_pages(int(feed.get("max_pages") or 20))
-        api_url = str(feed.get("url") or "https://newsinfo.eastmoney.com/kuaixun/v2/api/list").strip()
+        api_url = str(
+            feed.get("url")
+            or "https://np-weblist.eastmoney.com/comm/web/getFastNewsList"
+        ).strip()
+        sort_end = ""
         stop_feed = False
         for page in range(1, max_pages_feed + 1):
-            params = {"column": column, "p": page, "limit": limit}
+            params = {
+                "client": "web",
+                "biz": "web_724",
+                "fastColumn": column,
+                "sortEnd": sort_end,
+                "pageSize": limit,
+                "req_trace": str(int(time.time() * 1000)),
+            }
             url = api_url + ("&" if "?" in api_url else "?") + urllib.parse.urlencode(params)
-            raw_path = output_dir / f"feed_eastmoney_kuaixun_{safe_name(name)}_{column}_p{page}.json"
+            raw_path = output_dir / f"feed_eastmoney_fastnews_{safe_name(name)}_{column}_p{page}.json"
             try:
                 data = fetch_json_url(url, timeout=timeout)
                 raw_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
                 raw_files.append(str(raw_path))
-                rows = data.get("news") or []
+                rows = (((data.get("data") or {}).get("fastNewsList")) or [])
             except Exception as exc:  # noqa: BLE001
                 messages.append(f"{name} page {page}: {exc}")
                 source_coverage["error"] = str(exc)
                 break
             if not rows:
                 break
+            next_sort_end = str((((data.get("data") or {}).get("sortEnd")) or "")).strip()
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                date_text = str(row.get("showtime") or row.get("ordertime") or "").strip()
+                date_text = str(row.get("showTime") or row.get("showtime") or row.get("ordertime") or "").strip()
                 keep, stop, bucket, parsed = should_keep_feed_item(
                     value=date_text,
                     window_start=window_start,
@@ -651,20 +663,27 @@ def collect_eastmoney_feed_entry(
                 if not keep:
                     continue
                 title = str(row.get("title") or "").strip()
-                content = choose_content(row.get("digest"), row.get("simdigest"), title=title)
-                url_value = str(row.get("url_unique") or row.get("url_w") or row.get("url_m") or "").strip()
+                content = choose_content(row.get("summary"), row.get("digest"), row.get("simdigest"), title=title)
+                code = str(row.get("code") or row.get("newsid") or row.get("id") or "").strip()
+                url_value = str(
+                    row.get("url_unique")
+                    or row.get("url_w")
+                    or row.get("url_m")
+                    or (f"https://finance.eastmoney.com/a/{code}.html" if code else "")
+                    or ""
+                ).strip()
                 key = dedupe_key_for_item(
                     title=title,
                     content=content,
                     url=url_value,
-                    code=str(row.get("newsid") or row.get("id") or ""),
+                    code=code,
                 )
                 if key in seen:
                     continue
                 seen.add(key)
                 item = {
                     "index": len(items) + 1,
-                    "code": str(row.get("newsid") or row.get("id") or ""),
+                    "code": code,
                     "title": title,
                     "content": content or title,
                     "content_quality": content_quality(title=title, content=content),
@@ -683,6 +702,10 @@ def collect_eastmoney_feed_entry(
                 if smoke_source_done(source_coverage):
                     stop_feed = True
                     break
+            if next_sort_end and next_sort_end != sort_end:
+                sort_end = next_sort_end
+            elif rows:
+                sort_end = str(rows[-1].get("realSort") or sort_end)
             if stop_feed:
                 break
 
