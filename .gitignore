@@ -46,17 +46,17 @@ __pycache__/
 *.exe
 
 # Local/private workspace material; keep public code under modules/ and openclaw-telegram-wsl-setup/
-incoming_docs/
-invest/
-market-immersion-module/
-market-immersion/
-mx_data/
-people-daily-deep-read-preview/
-people-daily-policy-reading-zhihu.md
-people-daily-test-manifest.json
-scripts/
-skills/
-wechat-monitor/
+/incoming_docs/
+/invest/
+/market-immersion-module/
+/market-immersion/
+/mx_data/
+/people-daily-deep-read-preview/
+/people-daily-policy-reading-zhihu.md
+/people-daily-test-manifest.json
+/scripts/
+/skills/
+/wechat-monitor/
 
 # Editor and OS files
 .vscode/
