@@ -945,31 +945,25 @@ Architecture to explain to the user:
 - The module is installed as files under the OpenClaw workspace.
 - Scheduling is handled by WSL `systemd --user` timers.
 - Each timer calls `scripts/run_market_immersion.sh`.
-- The script collects source feeds, deduplicates them, validates that the requested time window is complete, then calls OpenClaw to do the lightweight整理.
-- Notion publishing happens only after source collection and OpenClaw整理 succeed.
+- The script collects source feeds, deduplicates them, marks coverage warnings when a source cannot fully page back to the requested window start, then calls OpenClaw to produce a compact information digest.
+- Notion publishing happens only after source collection and OpenClaw digest generation succeed.
 - This is not OpenClaw's own built-in scheduler. It is a reliable host timer that invokes OpenClaw as the processing layer.
 
-Default report sections:
+Default report structure:
 
 ```text
-1. 今日市场总览
-2. 高频主题/板块
-3. 公司公告与事件
-4. 研报/机构观点
-5. 政策与宏观信息
-6. 异动股票/板块
-7. 自选股相关信息
-8. 未归类信息
-9. 原始消息流
-观察备忘
+1. 信息汇总
+2. 原始消息流
+3. 本地 manifest / 调试归档
 ```
 
 Report rules:
 
-- Sections 1-8 contain lightly organized text, source names, and raw-message references. They should preserve meaning, not paste long excerpts.
-- Do not mechanically include message publish time, title, or source inside整理正文. Include time only when the reported event time is itself part of the information.
-- Section 9 keeps the chronological raw message flow with source, publish time, title, type, URL when available, and full original content.
-- If the source pool is non-empty but OpenClaw整理 fails or returns empty organized sections, treat the run as failed and do not publish it as a successful report.
+- The digest is written as 3-5 coherent natural paragraphs, not as fixed category columns.
+- The digest should preserve concrete subjects, numbers, event details, repeated themes, and meaningful differences across sources.
+- Do not mechanically include message publish time, title, or source inside the digest paragraphs. Include time only when the reported event time is itself part of the information.
+- The raw message flow keeps source, publish time, title, type, URL when available, and full original content in chronological order.
+- If the source pool is non-empty but OpenClaw digest generation fails or returns empty/low-quality summary paragraphs, treat the run as failed and do not publish it as a successful report.
 - Formal runs should attempt to cover the full requested feed window. If a source cannot page back far enough, publish only with an explicit coverage warning instead of silently implying completeness. Hard-fail only when core collection, OpenClaw整理, or enabled delivery steps fail.
 
 Default time windows:
