@@ -589,6 +589,31 @@ def save_publication_state(path: Path, state: dict[str, Any]) -> None:
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def resolve_people_daily_parent_page_id(config: dict[str, Any], notion_config: dict[str, Any], env: dict[str, str]) -> str:
+    """Resolve the Notion parent page for People's Daily publishing.
+
+    Local configs can keep page IDs out of the public repo by using env vars.
+    Resolution order is explicit People's Daily config, People's Daily env var,
+    global Notion config, then global Notion env var.
+    """
+    global_notion = config.get("notion") or {}
+    explicit = str(notion_config.get("people_daily_page_id") or "").strip()
+    if explicit:
+        return explicit
+    for key in (
+        notion_config.get("people_daily_page_id_env"),
+        notion_config.get("parent_page_id_env"),
+        global_notion.get("parent_page_id_env"),
+    ):
+        key = str(key or "").strip()
+        if key and env.get(key, "").strip():
+            return env[key].strip()
+    fallback = str(global_notion.get("parent_page_id") or "").strip()
+    if fallback:
+        return fallback
+    return ""
+
+
 def publish_to_notion(
     *,
     config: dict[str, Any],
@@ -627,7 +652,7 @@ def publish_to_notion(
     env = os.environ.copy()
     env.update(load_env_file(Path(notion_config.get("secrets_env") or (config.get("notion") or {}).get("secrets_env") or "").expanduser()))
     token = env.get(str(notion_config.get("token_env") or "NOTION_TOKEN"), "").strip()
-    parent_page_id = str(notion_config.get("people_daily_page_id") or "").strip()
+    parent_page_id = resolve_people_daily_parent_page_id(config, notion_config, env)
     if not token:
         raise RuntimeError("Missing NOTION_TOKEN for People's Daily publishing")
     if not parent_page_id:
@@ -737,6 +762,26 @@ def collect_or_load_manifest(args: argparse.Namespace, config: dict[str, Any]) -
     return manifest
 
 
+def validate_manifest(manifest: dict[str, Any], *, max_page_no: int, require_news: bool = True) -> None:
+    issue = manifest.get("issue") or {}
+    issue_date = compact(issue.get("date"))
+    if not issue_date:
+        raise RuntimeError("People's Daily manifest is missing issue.date")
+    pages = manifest.get("pages") or []
+    articles = manifest.get("articles") or []
+    if not pages:
+        raise RuntimeError("People's Daily crawl produced zero pages; likely network/page availability failure")
+    if not articles:
+        raise RuntimeError("People's Daily crawl produced zero articles; likely network/page availability failure")
+    if require_news:
+        selected_pages = news_pages(manifest)
+        selected_articles = detailed_articles(manifest, max_page_no)
+        if not selected_pages:
+            raise RuntimeError("People's Daily crawl found no 要闻 pages; do not publish partial/invalid output")
+        if not selected_articles:
+            raise RuntimeError("People's Daily crawl found no 要闻 articles; do not publish partial/invalid output")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run People's Daily deep-read workflow.")
     parser.add_argument("--config", default="../config/market_immersion_config.json")
@@ -747,6 +792,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delay", type=float)
     parser.add_argument("--no-pdf", action="store_true")
     parser.add_argument("--no-publish", action="store_true")
+    parser.add_argument("--no-validate", action="store_true", help="Skip manifest sanity checks")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -758,6 +804,10 @@ def main() -> int:
     config_path = (script_dir / args.config).resolve()
     config = load_json(config_path)
     manifest = collect_or_load_manifest(args, config)
+    if not args.no_validate:
+        pd_config = config.get("people_daily_deep_read") or {}
+        max_page_no = int((pd_config.get("analysis") or {}).get("detailed_max_page_no") or 4)
+        validate_manifest(manifest, max_page_no=max_page_no)
     print(f"issue={manifest['issue']['date']}")
     print(f"pages={len(manifest.get('pages') or [])}")
     print(f"articles={len(manifest.get('articles') or [])}")
