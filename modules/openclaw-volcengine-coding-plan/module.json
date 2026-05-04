@@ -1,0 +1,17 @@
+{
+  "id": "volcengine-coding-plan",
+  "name": "OpenClaw Volcengine Coding Plan",
+  "type": "openclaw-provider-module",
+  "version": "0.1.0",
+  "description": "Configures OpenClaw to use Volcengine Ark Coding Plan through the dedicated coding endpoint.",
+  "entrypoint": "scripts/set_volcengine_coding_plan_key.sh",
+  "verify": "scripts/verify_volcengine_coding_plan.sh",
+  "provider": "volcengine-plan",
+  "default_model": "volcengine-plan/ark-code-latest",
+  "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+  "secret_file": "~/.openclaw/secrets/volcengine.env",
+  "config_files": [
+    "~/.openclaw/openclaw.json",
+    "~/.openclaw/agents/main/agent/models.json"
+  ]
+}
