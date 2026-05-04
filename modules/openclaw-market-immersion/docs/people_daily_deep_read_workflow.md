@@ -95,7 +95,9 @@ systemctl --user status openclaw-people-daily-deep-read.service --no-pager
 ## Notion Rules
 
 - First publication may create the date page and article child pages.
-- If the date page already exists, the workflow skips unless `--force` is passed.
+- If the date page already exists and all expected article child pages are complete, the workflow skips unless `--force` is passed.
+- If a previous run left a partial date page, the next run repairs missing/empty article child pages instead of creating a duplicate date page.
+- A publish is marked complete only after all expected article child pages contain both `结构化原文与解析` and `全文深度解读`; otherwise the script exits non-zero so systemd can retry.
 - Small later edits should be block/section patches rather than full-page rebuilds.
 - Never publish secrets, local output, generated daily Markdown/HTML, or state files to Git.
 

@@ -555,6 +555,76 @@ def fill_article_pages(
     return filled
 
 
+def notion_block_text(block_value: dict[str, Any]) -> str:
+    block_type = str(block_value.get("type") or "")
+    payload = block_value.get(block_type) or {}
+    if block_type == "child_page":
+        return str(payload.get("title") or "")
+    rich_text = payload.get("rich_text") or []
+    return "".join(str(part.get("plain_text") or ((part.get("text") or {}).get("content") or "")) for part in rich_text)
+
+
+def article_child_has_content(child_id: str, token: str, timeout: int) -> bool:
+    children = list_page_children(child_id, token, timeout)
+    headings = {compact(notion_block_text(child)) for child in children if str(child.get("type") or "").startswith("heading_")}
+    return "结构化原文与解析" in headings and "全文深度解读" in headings and len(children) >= 6
+
+
+def inspect_article_children(
+    *,
+    date_page_id: str,
+    token: str,
+    detailed: list[dict[str, Any]],
+    title_by_url: dict[str, str],
+    timeout: int,
+) -> dict[str, Any]:
+    children = list_page_children(date_page_id, token, timeout)
+    child_pages = {
+        (child.get("child_page") or {}).get("title"): child
+        for child in children
+        if child.get("type") == "child_page"
+    }
+    missing: list[dict[str, Any]] = []
+    empty: list[dict[str, Any]] = []
+    complete = 0
+    for article in detailed:
+        title = title_by_url[article.get("url")]
+        child = child_pages.get(title)
+        if not child:
+            missing.append(article)
+            continue
+        if article_child_has_content(child["id"], token, timeout):
+            complete += 1
+        else:
+            empty.append(article)
+    return {
+        "complete": complete == len(detailed),
+        "complete_count": complete,
+        "expected": len(detailed),
+        "missing": missing,
+        "empty": empty,
+    }
+
+
+def append_missing_article_entries(
+    *,
+    date_page_id: str,
+    token: str,
+    articles: list[dict[str, Any]],
+    title_by_url: dict[str, str],
+    timeout: int,
+) -> None:
+    if not articles:
+        return
+    blocks: list[dict[str, Any]] = [block("heading_1", "补齐文章子页")]
+    for article in articles:
+        title = article.get("title") or "未命名"
+        blocks.append(block("heading_2", title))
+        blocks.append(block("paragraph", "正文：官方原文", article.get("url") or None))
+        blocks.append(block("child_page", title_by_url[article.get("url")]))
+    append_children(date_page_id, token, blocks, timeout)
+
+
 def find_existing_child_page(
     *,
     parent_page_id: str,
@@ -632,8 +702,6 @@ def publish_to_notion(
     state_path = publication_state_path(output_root)
     state = load_publication_state(state_path)
     existing = state.get(issue_key)
-    if existing and existing.get("page_id") and not force:
-        return {"enabled": True, "attempted": False, "skipped_duplicate": True, "page_id": existing.get("page_id")}
 
     max_page_no = int((pd_config.get("analysis") or {}).get("detailed_max_page_no") or 4)
     detailed = detailed_articles(manifest, max_page_no)
@@ -666,20 +734,97 @@ def publish_to_notion(
         title=title,
         timeout=timeout,
     )
-    if notion_existing and notion_existing.get("id") and not force:
+
+    candidate_page_id = ""
+    candidate_url = ""
+    candidate_source = ""
+    if not force and existing and existing.get("page_id"):
+        candidate_page_id = str(existing.get("page_id") or "")
+        candidate_url = str(existing.get("url") or "")
+        candidate_source = "local_publication_state"
+    if not force and notion_existing and notion_existing.get("id"):
+        candidate_page_id = str(notion_existing.get("id") or "")
+        candidate_url = str(notion_existing.get("url") or candidate_url)
+        candidate_source = "notion_title_check"
+
+    if candidate_page_id:
+        status = inspect_article_children(
+            date_page_id=candidate_page_id,
+            token=token,
+            detailed=detailed,
+            title_by_url=title_by_url,
+            timeout=timeout,
+        )
+        if status["complete"]:
+            state[issue_key] = {
+                "page_id": candidate_page_id,
+                "url": candidate_url,
+                "published_at": existing.get("published_at") if isinstance(existing, dict) else "",
+                "last_checked_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                "detailed_pages": status["complete_count"],
+                "status": "complete",
+                "source": candidate_source,
+            }
+            save_publication_state(state_path, state)
+            return {
+                "enabled": True,
+                "attempted": False,
+                "skipped_duplicate": True,
+                "page_id": candidate_page_id,
+                "source": candidate_source,
+                "detailed_pages": status["complete_count"],
+            }
+
+        repair_targets = list(status["missing"] or []) + list(status["empty"] or [])
+        append_missing_article_entries(
+            date_page_id=candidate_page_id,
+            token=token,
+            articles=list(status["missing"] or []),
+            title_by_url=title_by_url,
+            timeout=timeout,
+        )
+        analysis_settings = dict(pd_config.get("analysis") or {})
+        analysis_settings.setdefault("openclaw_bin", config.get("openclaw_bin") or "openclaw")
+        analysis_by_url: dict[str, dict[str, Any]] = {}
+        for idx, article in enumerate(repair_targets, 1):
+            print(f"repair analyze {idx}/{len(repair_targets)} {article.get('title')}")
+            analysis_by_url[article.get("url")] = analyze_article(article, analysis_settings, issue_date.strftime("%Y%m%d"))
+        filled = fill_article_pages(
+            date_page_id=candidate_page_id,
+            token=token,
+            detailed=repair_targets,
+            title_by_url=title_by_url,
+            analysis_by_url=analysis_by_url,
+            timeout=timeout,
+        )
+        repaired_status = inspect_article_children(
+            date_page_id=candidate_page_id,
+            token=token,
+            detailed=detailed,
+            title_by_url=title_by_url,
+            timeout=timeout,
+        )
         state[issue_key] = {
-            "page_id": notion_existing["id"],
-            "url": notion_existing.get("url"),
-            "published_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-            "discovered_from_notion": True,
+            "page_id": candidate_page_id,
+            "url": candidate_url,
+            "last_repaired_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "detailed_pages": repaired_status["complete_count"],
+            "expected_detailed_pages": repaired_status["expected"],
+            "status": "complete" if repaired_status["complete"] else "partial",
+            "source": candidate_source,
         }
         save_publication_state(state_path, state)
+        if not repaired_status["complete"]:
+            raise RuntimeError(
+                f"Notion page is still partial after repair: {repaired_status['complete_count']}/{repaired_status['expected']} article pages complete"
+            )
         return {
             "enabled": True,
-            "attempted": False,
-            "skipped_duplicate": True,
-            "page_id": notion_existing["id"],
-            "source": "notion_title_check",
+            "attempted": True,
+            "repaired_existing": True,
+            "page_id": candidate_page_id,
+            "detailed_pages": repaired_status["complete_count"],
+            "filled_now": len(filled),
         }
 
     analysis_settings = dict(pd_config.get("analysis") or {})
@@ -718,6 +863,17 @@ def publish_to_notion(
             timeout=timeout,
         )
 
+    state[issue_key] = {
+        "page_id": page["id"],
+        "url": page.get("url"),
+        "started_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "detailed_pages": 0,
+        "expected_detailed_pages": len(detailed),
+        "status": "partial",
+        "updated_existing": bool(existing_page_id),
+    }
+    save_publication_state(state_path, state)
+
     filled = fill_article_pages(
         date_page_id=page["id"],
         token=token,
@@ -726,14 +882,27 @@ def publish_to_notion(
         analysis_by_url=analysis_by_url,
         timeout=timeout,
     )
+    final_status = inspect_article_children(
+        date_page_id=page["id"],
+        token=token,
+        detailed=detailed,
+        title_by_url=title_by_url,
+        timeout=timeout,
+    )
     state[issue_key] = {
         "page_id": page["id"],
         "url": page.get("url"),
         "published_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-        "detailed_pages": len(filled),
+        "detailed_pages": final_status["complete_count"],
+        "expected_detailed_pages": final_status["expected"],
+        "status": "complete" if final_status["complete"] else "partial",
         "updated_existing": bool(existing_page_id),
     }
     save_publication_state(state_path, state)
+    if not final_status["complete"]:
+        raise RuntimeError(
+            f"Notion publish incomplete: {final_status['complete_count']}/{final_status['expected']} article pages complete"
+        )
     return {"enabled": True, "attempted": True, "page_id": page["id"], "url": page.get("url"), "detailed_pages": len(filled), "updated_existing": bool(existing_page_id)}
 
 
