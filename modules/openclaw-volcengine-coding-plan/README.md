@@ -1,6 +1,7 @@
-# OpenClaw Volcengine Coding Plan Module
+# OpenClaw Volcengine Coding Plan Notes
 
-This module configures OpenClaw for Volcengine Ark Coding Plan.
+This module documents the Volcengine Ark Coding Plan endpoint and OpenClaw
+model references.
 
 It exists because Ark Coding Plan is easy to misconfigure as the normal Ark
 inference API. The Coding Plan route must use the dedicated coding endpoint:
@@ -29,15 +30,10 @@ quota.
 ```text
 modules/openclaw-volcengine-coding-plan/
 |-- README.md
-|-- module.json
-`-- scripts/
-    |-- set_volcengine_coding_plan_key.sh
-    `-- verify_volcengine_coding_plan.sh
+`-- module.json
 ```
 
-## What The Installer Changes
-
-The installer writes the API key only to local OpenClaw state:
+## Local State
 
 ```text
 ~/.openclaw/secrets/volcengine.env
@@ -53,33 +49,6 @@ It also updates both OpenClaw model configuration locations:
 Updating both files matters. Some OpenClaw runs resolve provider catalog data
 from the agent-level `models.json`, so changing only `openclaw.json` can leave
 the model unavailable or routed through stale provider settings.
-
-## Install
-
-Run inside the WSL distro that owns OpenClaw:
-
-```bash
-cd /path/to/openclaw-wsl-toolkit/modules/openclaw-volcengine-coding-plan
-./scripts/set_volcengine_coding_plan_key.sh
-```
-
-Paste the real Ark API key value when prompted. Do not paste the key name, key
-ID, endpoint ID, Access Key ID, Secret Access Key, or a full command.
-
-The script does not print the secret. It shows only the key length and a short
-prefix/suffix shape for troubleshooting.
-
-## Verify
-
-```bash
-./scripts/verify_volcengine_coding_plan.sh
-```
-
-Expected result:
-
-- OpenClaw gateway service is active if systemd user service exists.
-- Default model resolves to `volcengine-plan/ark-code-latest`.
-- A local model call through OpenClaw returns text.
 
 ## Supported Coding Plan Models
 
@@ -106,4 +75,6 @@ the underlying Coding Plan model.
 - Never paste Ark API keys into chat.
 - Do not store real API keys in this module directory.
 - Prefer the Coding Plan endpoint for Coding Plan quota.
+- Prefer OpenClaw's native `openclaw configure`, `openclaw models`, and
+  `openclaw config` flows for provider setup.
 - Restart `openclaw-gateway.service` after changing provider configuration.
