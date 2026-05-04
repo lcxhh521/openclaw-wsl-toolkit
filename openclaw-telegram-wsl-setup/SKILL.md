@@ -211,7 +211,7 @@ Codex may be able to infer and run the right install commands from the current e
 9. Add or verify keepalive/autostart quietly so Ubuntu stays awake and the gateway starts after Windows login.
    - Treat this as internal infrastructure work, not a separate user-facing module.
    - Mention it to the user only as "I will keep OpenClaw running in the background after login" unless a permission prompt, visible window, or explicit confirmation is needed.
-   - Prefer hidden/minimized keepalive startup. If using a Startup-folder `.cmd`, explain whether any minimized WSL process is expected to remain running.
+   - Prefer hidden keepalive startup. If an older Startup-folder `.cmd` exists, replace it with the hidden `.vbs` keepalive so no WSL terminal remains visible.
    - Close successful setup windows after verifying the keepalive file/task exists and the gateway can be reached.
 
 10. Verify `openclaw gateway probe`.
@@ -356,18 +356,24 @@ User-facing guidance should stay minimal. Prefer saying: "I am setting up OpenCl
 Prefer keepalive options in this order:
 
 1. **Windows Scheduled Task** when the environment allows it. This is the cleanest long-term host-level autostart path, but it may require permissions and can fail with access denied.
-2. **Current-user Startup folder `.cmd`** as the default no-admin path. It is simple, visible to the user, and works well for no-brainer installs.
+2. **Current-user Startup folder hidden `.vbs`** as the default no-admin path. It is simple, user-level, and keeps WSL alive without opening a visible terminal.
 3. **Current-session hidden `Start-Process` keepalive** for immediate repair before persistent autostart is created or verified.
 4. **Visible terminal keepalive** only for debugging or when hidden/minimized launch is unavailable.
 
-For the default no-admin Startup-folder path, create a `.cmd` like this:
+For the default no-admin Startup-folder path, use `tools/openclaw-local-monitor/Install-WslKeepalive.ps1` or create an equivalent hidden `.vbs` entry:
 
-```cmd
-@echo off
-start "" /min wsl.exe -d Ubuntu -- bash -lc "systemctl --user restart openclaw-gateway.service; exec sleep infinity"
+```powershell
+$startup = [Environment]::GetFolderPath('Startup')
+$vbs = Join-Path $startup 'OpenClaw WSL Keepalive.vbs'
+@'
+Set shell = CreateObject("WScript.Shell")
+shell.Run "wsl.exe -d Ubuntu -- bash -lc ""systemctl --user restart openclaw-gateway.service; exec sleep infinity""", 0, False
+'@ | Set-Content -LiteralPath $vbs -Encoding ASCII
 ```
 
 If repairing an existing non-Ubuntu install, replace `Ubuntu` only after confirming that distro is the intended OpenClaw owner.
+
+If an old visible Startup-folder entry exists at `OpenClaw WSL Keepalive.cmd`, rename it to `OpenClaw WSL Keepalive.cmd.disabled` after creating the hidden `.vbs`. Do not leave both entries active.
 
 For immediate current-session repair, prefer a hidden process:
 
@@ -380,7 +386,7 @@ Start-Process -WindowStyle Hidden -FilePath 'wsl.exe' -ArgumentList @('-d','Ubun
 - Keepalive should be hidden or minimized whenever possible.
 - Do not leave an interactive terminal visible after keepalive setup succeeds unless the visible terminal is intentionally being used for debugging.
 - Close successful setup windows after verifying the startup entry and gateway state.
-- If using a Startup-folder `.cmd`, explain that a minimized WSL process may remain running after login and that this is expected infrastructure.
+- If replacing an old Startup-folder `.cmd`, explain that the `.vbs` keeps WSL alive invisibly after login and the disabled `.cmd` is only a rollback copy.
 - If the user sees multiple keepalive or helper windows, identify the active one, verify whether keepalive is already running, then close successful or stale extras.
 
 ### Idempotency And Duplicate Control

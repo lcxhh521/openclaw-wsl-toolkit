@@ -96,6 +96,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Uninstall-Autostart.ps
 
 This removes only the Startup shortcut. It does not delete the monitor folder.
 
+## Hidden WSL Keepalive
+
+If OpenClaw should stay online after Windows login, install the separate hidden WSL keepalive:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-WslKeepalive.ps1
+```
+
+This creates `OpenClaw WSL Keepalive.vbs` in the current user's Startup folder. The script starts Ubuntu and keeps WSL alive without showing a terminal window. If an old `OpenClaw WSL Keepalive.cmd` exists, the installer renames it to `.cmd.disabled` so it cannot open a visible console at login.
+
 ## Notes
 
 - Do not store OpenClaw tokens, API keys, auth profiles, or logs in this folder.
