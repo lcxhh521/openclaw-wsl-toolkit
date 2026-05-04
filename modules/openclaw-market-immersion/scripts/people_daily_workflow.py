@@ -108,14 +108,31 @@ def is_editorial_metadata(article: dict[str, Any]) -> bool:
     return int(article.get("char_count") or 0) <= 40 and ("责编" in title or "邮箱" in title)
 
 
+def is_news_page_label(label: Any) -> bool:
+    """Return True for People's Daily pages that should enter deep-read output."""
+    text = compact(label)
+    return bool(text) and "要闻" in text
+
+
+def news_pages(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    return [page for page in manifest.get("pages") or [] if is_news_page_label(page.get("page_label"))]
+
+
+def news_page_numbers(manifest: dict[str, Any]) -> set[str]:
+    return {str(page.get("page_no") or "") for page in news_pages(manifest)}
+
+
 def detailed_articles(manifest: dict[str, Any], max_page_no: int) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
+    allowed_page_numbers = news_page_numbers(manifest)
     for article in manifest.get("articles") or []:
         try:
             page_no = int(str(article.get("page_no") or "99"))
         except ValueError:
             page_no = 99
-        if page_no <= max_page_no and not is_editorial_metadata(article):
+        page_number = str(article.get("page_no") or "")
+        keep_page = page_number in allowed_page_numbers if allowed_page_numbers else page_no <= max_page_no
+        if keep_page and not is_editorial_metadata(article):
             result.append(article)
     return result
 
@@ -335,7 +352,7 @@ def build_article_page_blocks(article: dict[str, Any], analysis: dict[str, Any])
         block("bulleted_list_item", f"版面：{page_label_for(article)}"),
         block("bulleted_list_item", "官方原文", str(article.get("url") or "")),
         block("bulleted_list_item", f"正文规模：约 {article.get('char_count') or 0} 字"),
-        block("heading_1", "逐段对照解读"),
+        block("heading_1", "结构化原文与解析"),
     ]
     notes = list(analysis.get("paragraph_notes") or [])
     paragraphs = [compact(p) for p in article.get("paragraphs") or [] if compact(p)]
@@ -370,38 +387,73 @@ def build_article_page_blocks(article: dict[str, Any], analysis: dict[str, Any])
     return blocks
 
 
+def build_daily_overview_lines(detailed: list[dict[str, Any]], analysis_by_url: dict[str, dict[str, Any]]) -> list[str]:
+    """Build a compact date-page overview from article-level analyses.
+
+    Private deployments can replace this with a richer prompt-generated overview;
+    this deterministic version keeps the public workflow usable without embedding
+    user-specific reading strategies in the repository.
+    """
+    if not detailed:
+        return ["今天未识别到可进入深读流程的要闻文章；请检查人民日报版面标签或抓取结果。"]
+    by_page: dict[str, list[dict[str, Any]]] = {}
+    for article in detailed:
+        by_page.setdefault(page_label_for(article), []).append(article)
+    first_titles = "、".join((a.get("title") or "未命名") for a in detailed[:3])
+    lines = [
+        f"今天的要闻深读共保留 {len(detailed)} 篇文章。入口判断应先看头版与其他要闻版面的组合关系，而不是把每篇文章平均摘要；头几篇文章包括：{first_titles}。",
+        "阅读时应区分不同文章承担的功能：有的负责定调，有的负责把定调落到经济、科技、治理、民生、国际叙事或执行场景。真正有价值的是看这些文章如何共同形成当天的政策信号和评价口径。",
+    ]
+    page_summary = "；".join(f"{label} {len(items)} 篇" for label, items in by_page.items())
+    lines.append(f"版面覆盖为：{page_summary}。后续复核时，重点检查每篇的整篇深度解读和子页结构化原文与解析是否完整、是否仍能回到原文证据。")
+
+    analysis_fragments: list[str] = []
+    for article in detailed:
+        analysis = analysis_by_url.get(article.get("url")) or {}
+        for line in analysis.get("full_analysis") or []:
+            text = compact(line)
+            if text:
+                analysis_fragments.append(text)
+                break
+        if len(analysis_fragments) >= 2:
+            break
+    if analysis_fragments:
+        lines.append("从逐篇深读看，当前最先浮出的线索是：" + "；".join(analysis_fragments)[:900])
+    return lines[:5]
+
+
 def build_date_page_blocks(
     *,
     manifest: dict[str, Any],
     detailed: list[dict[str, Any]],
     detailed_title_by_url: dict[str, str],
+    analysis_by_url: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    analysis_by_url = analysis_by_url or {}
     blocks: list[dict[str, Any]] = [
-        block("heading_1", "全日总览"),
-        block(
-            "paragraph",
-            "本页按人民日报电子版归档：PDF保留版面原貌，正文通过官方原文入口进入；前4版文章在各自条目下方放置逐篇深读子页。阅读重点不是摘要，而是版面信号、主体排序、政策链路、图像/版式暗示和后续验证。",
-        ),
-        block("heading_1", "今日版面信号观察"),
-        block("bulleted_list_item", "先看版面顺序和组合：头版负责定调，后续版面常承担展开、经验推广、执行动员、国际叙事或评论功能。"),
-        block("bulleted_list_item", "重点看同一主题是否跨版重复出现；重复通常意味着政策优先级、宣传动员或治理压力。"),
-        block("bulleted_list_item", "图片和版式需要补读：人物、场景、设备、群众、边疆/基层/工厂/港口等视觉主体，可能承担文字之外的政治信号。"),
-        block("heading_1", "全日PDF"),
+        block("heading_1", "今日总览"),
     ]
-    for page in manifest.get("pages") or []:
+    for line in build_daily_overview_lines(detailed, analysis_by_url):
+        blocks.append(block("paragraph", line))
+
+    blocks.append(block("heading_1", "全日PDF"))
+    selected_pages = news_pages(manifest) or list(manifest.get("pages") or [])
+    for page in selected_pages:
         label = page.get("page_label") or page.get("page_no") or ""
         blocks.append(block("bulleted_list_item", f"{label} PDF", page.get("pdf_url") or None))
 
     detailed_urls = {article.get("url") for article in detailed}
     articles_by_page: dict[str, list[dict[str, Any]]] = {}
-    for article in manifest.get("articles") or []:
+    for article in detailed:
         if is_editorial_metadata(article):
             continue
         articles_by_page.setdefault(str(article.get("page_no") or ""), []).append(article)
 
-    for page in manifest.get("pages") or []:
+    for page in selected_pages:
         page_no = str(page.get("page_no") or "")
         label = page.get("page_label") or f"第{page_no}版"
+        if not articles_by_page.get(page_no):
+            continue
         blocks.append(block("heading_1", label))
         for article in articles_by_page.get(page_no, []):
             title = article.get("title") or "未命名"
@@ -612,7 +664,12 @@ def publish_to_notion(
         print(f"analyze {idx}/{len(detailed)} {article.get('title')}")
         analysis_by_url[article.get("url")] = analyze_article(article, analysis_settings, issue_date.strftime("%Y%m%d"))
 
-    blocks = build_date_page_blocks(manifest=manifest, detailed=detailed, detailed_title_by_url=title_by_url)
+    blocks = build_date_page_blocks(
+        manifest=manifest,
+        detailed=detailed,
+        detailed_title_by_url=title_by_url,
+        analysis_by_url=analysis_by_url,
+    )
 
     existing_page_id = ""
     existing_url = ""
