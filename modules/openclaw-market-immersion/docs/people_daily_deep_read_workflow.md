@@ -76,6 +76,10 @@ For large article batches, use a staged flow:
 6. Do not touch approved article-level deep reads, date overview, PDF links, or unrelated sections.
 7. Patch Notion only after local verification, preferably with a conservative block-level patch helper.
 
+## Delivery
+
+When Telegram delivery is enabled for the workflow, the user-facing completion message should contain the Notion page link only. Local Markdown, manifest paths, HTML previews, output directories, and generated state files are internal audit artifacts; do not surface them as the completion reminder.
+
 ## Automation
 
 The module ships a user-level systemd timer:
@@ -100,6 +104,7 @@ systemctl --user status openclaw-people-daily-deep-read.service --no-pager
 - A publish is marked complete only after all expected article child pages contain both `结构化原文与解析` and `全文深度解读`; otherwise the script exits non-zero so systemd can retry.
 - Small later edits should be block/section patches rather than full-page rebuilds.
 - Never publish secrets, local output, generated daily Markdown/HTML, or state files to Git.
+- Completion notifications should point to the Notion URL, not local files.
 
 ## Quality Gate
 

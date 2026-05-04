@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -746,6 +747,11 @@ def publish_to_notion(
         candidate_page_id = str(notion_existing.get("id") or "")
         candidate_url = str(notion_existing.get("url") or candidate_url)
         candidate_source = "notion_title_check"
+    if candidate_page_id and not candidate_url:
+        try:
+            candidate_url = str(notion_request(method="GET", url=f"https://api.notion.com/v1/pages/{candidate_page_id}", token=token, timeout=timeout).get("url") or "")
+        except Exception:
+            candidate_url = ""
 
     if candidate_page_id:
         status = inspect_article_children(
@@ -771,6 +777,7 @@ def publish_to_notion(
                 "attempted": False,
                 "skipped_duplicate": True,
                 "page_id": candidate_page_id,
+                "url": candidate_url,
                 "source": candidate_source,
                 "detailed_pages": status["complete_count"],
             }
@@ -823,6 +830,7 @@ def publish_to_notion(
             "attempted": True,
             "repaired_existing": True,
             "page_id": candidate_page_id,
+            "url": candidate_url,
             "detailed_pages": repaired_status["complete_count"],
             "filled_now": len(filled),
         }
@@ -951,6 +959,94 @@ def validate_manifest(manifest: dict[str, Any], *, max_page_no: int, require_new
             raise RuntimeError("People's Daily crawl found no 要闻 articles; do not publish partial/invalid output")
 
 
+
+def telegram_bot_token_from_config(path: Path) -> str:
+    try:
+        config = json.loads(path.expanduser().read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    return str(((config.get("channels") or {}).get("telegram") or {}).get("botToken") or "").strip()
+
+
+def send_telegram_bot_api(*, bot_token: str, chat_id: str, text: str, timeout: int) -> dict[str, Any]:
+    body = urllib.parse.urlencode(
+        {
+            "chat_id": chat_id.removeprefix("telegram:"),
+            "text": text,
+            "disable_web_page_preview": "false",
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    return {
+        "enabled": True,
+        "attempted": True,
+        "provider": "telegram_bot_api",
+        "returncode": 0 if payload.get("ok") else 1,
+        "message_id": ((payload.get("result") or {}).get("message_id")),
+    }
+
+
+def deliver_people_daily_link(*, config: dict[str, Any], manifest: dict[str, Any], publication: dict[str, Any]) -> dict[str, Any]:
+    pd_config = config.get("people_daily_deep_read") or {}
+    telegram = (pd_config.get("telegram") or config.get("telegram") or {})
+    if not telegram.get("enabled"):
+        return {"enabled": False, "attempted": False}
+    url = str(publication.get("url") or "").strip()
+    if not url:
+        return {"enabled": True, "attempted": False, "reason": "missing Notion url"}
+    target = str(telegram.get("target") or "").strip()
+    if not target:
+        return {"enabled": True, "attempted": False, "reason": "missing telegram target"}
+
+    issue_date = issue_date_from_manifest(manifest)
+    title = format_issue_title(issue_date)
+    message = f"人民日报深读完成：{title}\nNotion：{url}"
+    timeout = int(telegram.get("timeout") or 120)
+    method = str(telegram.get("delivery_method") or "").strip().lower()
+    if str(telegram.get("channel") or "telegram") == "telegram" and method == "bot_api":
+        token = telegram_bot_token_from_config(Path(telegram.get("openclaw_config_path") or "~/.openclaw/openclaw.json"))
+        if not token:
+            return {"enabled": True, "attempted": False, "reason": "missing channels.telegram.botToken"}
+        try:
+            return send_telegram_bot_api(bot_token=token, chat_id=target, text=message, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            return {"enabled": True, "attempted": True, "provider": "telegram_bot_api", "exception": str(exc)}
+
+    openclaw_bin = Path(config.get("openclaw_bin") or "openclaw").expanduser()
+    cmd = [
+        str(openclaw_bin),
+        "message",
+        "send",
+        "--channel",
+        str(telegram.get("channel") or "telegram"),
+        "--target",
+        target,
+        "--message",
+        message,
+    ]
+    account = str(telegram.get("account") or "").strip()
+    if account:
+        cmd.extend(["--account", account])
+    try:
+        completed = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout, check=False)
+        return {
+            "enabled": True,
+            "attempted": True,
+            "provider": "openclaw_cli",
+            "returncode": completed.returncode,
+            "stdout": completed.stdout[-1200:],
+            "stderr": completed.stderr[-1200:],
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"enabled": True, "attempted": True, "provider": "openclaw_cli", "exception": str(exc)}
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run People's Daily deep-read workflow.")
     parser.add_argument("--config", default="../config/market_immersion_config.json")
@@ -983,9 +1079,12 @@ def main() -> int:
     if args.no_publish:
         return 0
     result = publish_to_notion(config=config, manifest=manifest, force=args.force, dry_run=args.dry_run)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    delivery = deliver_people_daily_link(config=config, manifest=manifest, publication=result)
+    print(json.dumps({"notion": result, "telegram": delivery}, ensure_ascii=False, indent=2))
     if result.get("enabled") and not result.get("attempted") and not result.get("dry_run") and not result.get("skipped_duplicate"):
         return 2
+    if delivery.get("enabled") and delivery.get("attempted") and (delivery.get("exception") or int(delivery.get("returncode") or 0) != 0):
+        return 7
     return 0
 
 

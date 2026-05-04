@@ -160,6 +160,22 @@ def parse_article(url: str, html_text: str, fallback_title: str = "") -> dict[st
     if not paragraphs and content_html:
         paragraphs = [p for p in clean_text(content_html).splitlines() if p.strip()]
 
+    article_images: list[dict[str, str]] = []
+    for img_tag in re.findall(r"<img\b(?:\"[^\"]*\"|'[^']*'|[^>])*>", content_html + "\n" + html_text, flags=re.I | re.S):
+        if "picture-illustrating" not in img_tag and "data-original-title" not in img_tag:
+            continue
+        src_match = re.search(r"\bsrc=[\"']([^\"']+)[\"']", img_tag, flags=re.I)
+        if not src_match:
+            continue
+        caption_match = re.search(r"\bdata-original-title=[\"']([^\"']*)[\"']", img_tag, flags=re.I | re.S)
+        caption = clean_text(caption_match.group(1)) if caption_match else ""
+        article_images.append(
+            {
+                "url": urllib.parse.urljoin(url, src_match.group(1)),
+                "caption": caption,
+            }
+        )
+
     page_label = ""
     page_match = re.search(r"第\s*(&nbsp;|\s)*(\d{1,2})\s*(&nbsp;|\s)*版", meta)
     if page_match:
@@ -176,6 +192,7 @@ def parse_article(url: str, html_text: str, fallback_title: str = "") -> dict[st
         "meta": meta,
         "page_label": page_label,
         "paragraphs": paragraphs,
+        "article_images": article_images,
         "char_count": sum(len(p) for p in paragraphs),
     }
 
@@ -207,14 +224,18 @@ def concise_analysis(article: dict[str, Any]) -> str:
 
 def build_openclaw_prompt(article: dict[str, Any], issue_date: str, page_label: str) -> str:
     source_text = "\n".join(article.get("paragraphs") or [])
-    return f"""你是中文报刊深读分析助手。请基于以下《人民日报》原文做深度解析。
+    return f"""你是中文报刊深读分析助手。请把《人民日报》当作公开政治/政策信号系统来读，基于以下原文做深度解析。
 
 要求：
 1. 不要复述全文，不要写空泛评价。
 2. 必须解释文章的论证结构：它先确立什么问题，再用哪些事实或概念推进，最后落到什么政策/价值判断。
-3. 必须指出文中的具体细节、数字、机构、地点或时间如何支撑论点。
-4. 可以做低强度判断，但每个判断都要贴着原文事实，不要延展到原文没有支持的宏大结论。
-5. 输出 Markdown，结构固定为：核心观点、论证链条、关键细节、隐含语义、值得对照阅读的地方。
+3. 必须读出政治经济意义：文章承担什么政治功能，关联哪些资源配置、产业方向、财政/金融安排、公共服务投入、区域发展或企业角色。
+4. 必须读出信号对象和隐含深意：主要说给谁听，透露了什么政策优先级、考核压力、治理边界、风险遮蔽或未展开的利益冲突。
+5. 必须指出文中的具体细节、数字、机构、地点、时间和措辞如何支撑判断。
+6. 判断要贴着原文证据，不要离开材料做阴谋论式推断。
+7. 不要写固定“后续验证”尾巴；如确有必要，只在文中自然点出可观察的文件、资金、项目或数据。
+8. 不要输出后台生产说明，例如原始文章数、合并数量、跨版说明、归入首次版面、后续延续至某版。
+9. 输出 Markdown，结构固定为：核心判断、政治经济意义、信号对象与隐含深意、论证链条、关键细节、缺席与边界。
 
 期号：人民日报 {issue_date} {page_label}
 标题：{article.get("title") or ""}

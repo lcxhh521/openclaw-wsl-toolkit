@@ -318,7 +318,7 @@ scripts/market_feed_snapshot.py
 ~/.openclaw/workspace/people-daily-deep-read/YYYY-MM-DD/
 ```
 
-包含 `manifest.json`、PDF 原件、Markdown 归档，以及本地 HTML 对照页。正式发布时会调用 OpenClaw 为每篇深读文章生成逐段解析，Notion 子页采用“逐段原文 + 对应解析 + 全文深度解读”的结构，便于审计原文和解释之间的关系。
+包含 `manifest.json`、PDF 原件、Markdown 归档，以及本地 HTML 对照页；这些只是内部审计材料。正式发布时会调用 OpenClaw 为每篇深读文章生成逐段解析，Notion 子页采用“逐段原文 + 对应解析 + 全文深度解读”的结构，便于审计原文和解释之间的关系。若启用 Telegram 完成提醒，只发送 Notion 链接，不发送本地 Markdown、manifest 或输出目录。
 
 ### 配置自己的人民日报深读 prompt
 
@@ -383,8 +383,11 @@ systemctl --user enable --now openclaw-market-immersion-morning.timer
 systemctl --user enable --now openclaw-market-immersion-midday.timer
 systemctl --user enable --now openclaw-market-immersion-close.timer
 systemctl --user enable --now openclaw-market-immersion-night.timer
-systemctl --user enable --now openclaw-market-feed-snapshot.timer
 ```
+
+`openclaw-market-feed-snapshot.timer` 是接口失效时的临时兜底快照，不默认启用；正常情况下依赖各源分页/游标回溯与窗口覆盖校验。
+
+市场简报的“原始消息流”按审计材料处理：没有标题就不生造标题，只显示序号和正文；接口时间戳会统一格式化；同一行情的多源重复快讯会尽量合并为“来源等 N 源”。
 
 ## IMA 知识库接入
 

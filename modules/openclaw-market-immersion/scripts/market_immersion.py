@@ -258,12 +258,41 @@ def number_tokens(text: str) -> set[str]:
     return set(re.findall(r"\d+(?:\.\d+)?%?", str(text or "")))
 
 
+def _number_token_value(token: str) -> tuple[float, bool] | None:
+    text = str(token or "").strip()
+    if not text:
+        return None
+    is_percent = text.endswith("%")
+    try:
+        return float(text.rstrip("%")), is_percent
+    except ValueError:
+        return None
+
+
 def entity_like_terms(text: str) -> set[str]:
     pattern = (
         r"[\u4e00-\u9fffA-Za-z0-9]{2,24}(?:集团|公司|银行|证券|基金|交易所|委员会|管理局|"
         r"部门|组织|机构|口岸|海峡|隧道|机场|铁路|高速|景区|油田|油轮|法案|指数|学校|单位|省|市)"
     )
     return set(re.findall(pattern, str(text or "")))
+
+
+def market_quote_terms(text: str) -> set[str]:
+    value = str(text or "")
+    terms: set[str] = set()
+    for pattern in (
+        r"(?:布伦特|WTI|美|伦敦|纽约|COMEX|LME)?[\u4e00-\u9fffA-Za-z0-9]{0,12}(?:原油|黄金|白银|铜|铝|锌|镍|天然气|期货)",
+        r"[\u4e00-\u9fffA-Za-z0-9]{2,20}(?:美股|港股|盘前|盘后)",
+        r"[\u4e00-\u9fffA-Za-z0-9]{2,20}(?:科技|集团|公司|芯片|半导体|汽车|银行)",
+    ):
+        for term in re.findall(pattern, value):
+            cleaned = term.strip(" ：:，,。！？；;、")
+            if 3 <= len(cleaned) <= 24:
+                terms.add(cleaned)
+                for marker in ("原油", "黄金", "白银", "天然气", "科技", "芯片", "半导体"):
+                    if marker in cleaned:
+                        terms.add(cleaned[: cleaned.find(marker) + len(marker)])
+    return terms
 
 
 def content_fingerprint_keys(item: dict[str, Any]) -> list[str]:
@@ -287,8 +316,21 @@ def content_fingerprint_keys(item: dict[str, Any]) -> list[str]:
 def numbers_compatible(left: set[str], right: set[str]) -> bool:
     if not left or not right:
         return True
-    overlap = left & right
-    return bool(overlap) and len(overlap) / min(len(left), len(right)) >= 0.5
+    matched = 0
+    right_values = [value for value in (_number_token_value(token) for token in right) if value is not None]
+    for token in left:
+        parsed = _number_token_value(token)
+        if parsed is None:
+            continue
+        left_value, left_percent = parsed
+        for right_value, right_percent in right_values:
+            if left_percent != right_percent:
+                continue
+            tolerance = max(0.02, abs(left_value) * 0.003, abs(right_value) * 0.003)
+            if abs(left_value - right_value) <= tolerance:
+                matched += 1
+                break
+    return matched > 0 and matched / min(len(left), len(right)) >= 0.5
 
 
 def content_overlap_duplicate(existing: dict[str, Any], incoming: dict[str, Any]) -> bool:
@@ -298,7 +340,7 @@ def content_overlap_duplicate(existing: dict[str, Any], incoming: dict[str, Any]
     incoming_content = str(incoming.get("content") or "")
     existing_body = normalize_for_duplicate(existing_content, limit=500)
     incoming_body = normalize_for_duplicate(incoming_content, limit=500)
-    if len(existing_body) < 24 or len(incoming_body) < 24:
+    if len(existing_body) < 16 or len(incoming_body) < 16:
         return False
 
     title_similarity = jaccard_similarity(
@@ -323,6 +365,9 @@ def content_overlap_duplicate(existing: dict[str, Any], incoming: dict[str, Any]
     if body_similarity >= 0.55 and title_similarity >= 0.35 and number_support:
         return True
     if title_similarity >= 0.82 and body_similarity >= 0.32 and number_support:
+        return True
+    common_quote_terms = market_quote_terms(existing_title + existing_content) & market_quote_terms(incoming_title + incoming_content)
+    if common_quote_terms and number_support and body_similarity >= 0.2:
         return True
     return False
 
@@ -965,7 +1010,7 @@ def collect_market_feed_entry(
                     "title": title,
                     "content": content or title,
                     "content_quality": content_quality(title=title, content=content),
-                    "date": date_text,
+                    "date": parsed.astimezone(now_local().tzinfo).strftime("%Y-%m-%d %H:%M:%S") if parsed else date_text,
                     "source": "同花顺快讯",
                     "type": name,
                     "entity": ",".join(tag_item.get("name", "") for tag_item in (row.get("tagInfo") or []) if isinstance(tag_item, dict)),
@@ -1506,10 +1551,25 @@ def display_body_without_title(*, title: str, content: str) -> str:
     return normalized_content
 
 
+def display_date_for_item(item: dict[str, Any]) -> str:
+    raw_date = str(item.get("date") or "").strip()
+    parsed_text = str(item.get("parsed_at") or "").strip()
+    if raw_date:
+        parsed = parse_item_datetime(raw_date, now_local().tzinfo)
+    elif parsed_text:
+        parsed = parse_item_datetime(parsed_text, now_local().tzinfo)
+    else:
+        parsed = None
+    if parsed:
+        return parsed.astimezone(now_local().tzinfo).strftime("%Y-%m-%d %H:%M:%S")
+    return raw_date
+
+
 def raw_message_meta_line(item: dict[str, Any]) -> str:
     parts = []
-    if item.get("date"):
-        parts.append(str(item["date"]))
+    display_date = display_date_for_item(item)
+    if display_date:
+        parts.append(display_date)
     if item.get("source"):
         sources = [str(x) for x in item.get("duplicate_sources") or [] if x]
         if len(sources) > 1:
