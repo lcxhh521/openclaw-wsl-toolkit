@@ -148,6 +148,64 @@
         "max_pages": 20
       }
     ],
+    "tonghuashun_flash": [
+      {
+        "id": "ths_all",
+        "name": "同花顺实时快讯-全部",
+        "tag": "21101",
+        "page_size": 50,
+        "max_pages": 20
+      },
+      {
+        "id": "ths_important",
+        "name": "同花顺实时快讯-重要",
+        "tag": "-21101",
+        "page_size": 50,
+        "max_pages": 20
+      },
+      {
+        "id": "ths_a_share",
+        "name": "同花顺实时快讯-A股",
+        "tag": "21103",
+        "page_size": 50,
+        "max_pages": 20
+      },
+      {
+        "id": "ths_hk_stock",
+        "name": "同花顺实时快讯-港股",
+        "tag": "21105",
+        "page_size": 50,
+        "max_pages": 20
+      },
+      {
+        "id": "ths_us_stock",
+        "name": "同花顺实时快讯-美股",
+        "tag": "21107",
+        "page_size": 50,
+        "max_pages": 20
+      },
+      {
+        "id": "ths_opportunity",
+        "name": "同花顺实时快讯-机会",
+        "tag": "21109",
+        "page_size": 50,
+        "max_pages": 20
+      },
+      {
+        "id": "ths_unusual_move",
+        "name": "同花顺实时快讯-异动",
+        "tag": "21111",
+        "page_size": 50,
+        "max_pages": 20
+      },
+      {
+        "id": "ths_announcement",
+        "name": "同花顺实时快讯-公告",
+        "tag": "34843",
+        "page_size": 50,
+        "max_pages": 20
+      }
+    ],
     "wallstreetcn_live": [
       {
         "id": "wallstreetcn_global",
@@ -170,7 +228,8 @@
     "account": "default",
     "send_mode": "link",
     "send_smoke": false,
-    "timeout": 120
+    "timeout": 120,
+    "delivery_method": "openclaw_cli"
   },
   "runs": {
     "smoke": {

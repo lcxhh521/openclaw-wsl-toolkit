@@ -75,16 +75,29 @@ def parse_iso(value: str | None) -> dt.datetime | None:
         return None
 
 
-def default_window_start(phase: str, end: dt.datetime) -> dt.datetime:
-    boundaries = {
-        "morning": (1, dt.time(22, 10)),
-        "midday": (0, dt.time(9, 5)),
-        "close": (0, dt.time(12, 15)),
-        "night": (0, dt.time(15, 20)),
-    }
-    days_back, boundary_time = boundaries.get(phase, (0, dt.time(0, 0)))
-    day = (end - dt.timedelta(days=days_back)).date()
-    return dt.datetime.combine(day, boundary_time, tzinfo=end.tzinfo)
+PHASE_WINDOWS: dict[str, tuple[int, dt.time, dt.time]] = {
+    # phase: (start days back from report date, start time, scheduled end time)
+    "morning": (1, dt.time(22, 10), dt.time(9, 5)),
+    "midday": (0, dt.time(9, 5), dt.time(12, 15)),
+    "close": (0, dt.time(12, 15), dt.time(15, 20)),
+    "night": (0, dt.time(15, 20), dt.time(22, 10)),
+}
+
+
+def scheduled_phase_window(phase: str, now: dt.datetime) -> tuple[dt.datetime, dt.datetime] | None:
+    spec = PHASE_WINDOWS.get(phase)
+    if not spec:
+        return None
+    start_days_back, start_time, end_time = spec
+    report_date = now.date()
+    # If a same-day phase is manually retried before its start time, it usually refers
+    # to the previous report date rather than a future window. Morning starts the
+    # previous evening, so pre-09:05 same-day runs still belong to today's morning window.
+    if start_days_back == 0 and now.time() < start_time:
+        report_date = report_date - dt.timedelta(days=1)
+    window_end = dt.datetime.combine(report_date, end_time, tzinfo=now.tzinfo)
+    window_start = dt.datetime.combine(report_date - dt.timedelta(days=start_days_back), start_time, tzinfo=now.tzinfo)
+    return window_start, window_end
 
 
 def compute_window(
@@ -95,20 +108,10 @@ def compute_window(
 ) -> tuple[dt.datetime | None, dt.datetime | None, str]:
     if phase == "smoke":
         return None, None, "smoke"
-
-    state_path = output_root / "state.json"
-    state: dict[str, Any] = {}
-    if state_path.exists():
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            state = {}
-
-    last_success = parse_iso(state.get("last_success_at"))
-    default_start = default_window_start(phase, end)
-    if last_success and last_success < end:
-        return last_success, end, "last_success"
-    return default_start, end, "scheduled_boundary"
+    scheduled = scheduled_phase_window(phase, end)
+    if scheduled:
+        return scheduled[0], scheduled[1], "scheduled_phase_window"
+    return None, end, "now"
 
 
 def format_window_for_query(start: dt.datetime | None, end: dt.datetime | None) -> str:
@@ -225,6 +228,17 @@ def duplicate_keys_for_item(item: dict[str, Any]) -> list[str]:
         if key not in keys:
             keys.append(key)
     return keys
+
+
+def split_bracketed_title_content(content: Any) -> tuple[str, str]:
+    """Sina live items commonly encode title as leading 【title】 and body after it."""
+    text = " ".join(str(content or "").split())
+    match = re.match(r"^【([^】]{4,100})】\s*(.*)$", text)
+    if not match:
+        return "", text
+    title = match.group(1).strip()
+    body = match.group(2).lstrip(" ：:，,。")
+    return title, body
 
 
 def duplicate_ngrams(text: str, *, n: int = 3, limit: int = 360) -> set[str]:
@@ -442,7 +456,7 @@ def should_keep_feed_item(
     return True, False, bucket, parsed
 
 
-def collect_eastmoney_feed_entry(
+def collect_market_feed_entry(
     *,
     config: dict[str, Any],
     output_dir: Path,
@@ -454,8 +468,6 @@ def collect_eastmoney_feed_entry(
         return None
 
     columns = feed_config.get("columns") or []
-    if not columns:
-        return None
 
     page_size = int(feed_config.get("page_size") or 100)
     max_pages = int(feed_config.get("max_pages") or 20)
@@ -882,6 +894,95 @@ def collect_eastmoney_feed_entry(
             if stop_feed:
                 break
 
+    for feed in feed_config.get("tonghuashun_flash") or []:
+        name = str(feed.get("name") or "同花顺实时快讯")
+        source_coverage = begin_coverage(
+            name,
+            "同花顺新闻实时快讯接口按 page/tag 拉取，直到最旧消息早于本次窗口起点。",
+        )
+        tag = str(feed.get("tag") or "21101").strip()
+        page_size_feed = int(feed.get("page_size") or 50)
+        max_pages_feed = effective_max_pages(int(feed.get("max_pages") or 20))
+        api_url = str(
+            feed.get("url")
+            or "https://news.10jqka.com.cn/tapp/news/push/stock/"
+        ).strip()
+        stop_feed = False
+        for page in range(1, max_pages_feed + 1):
+            params = {
+                "page": page,
+                "track": "website",
+                "pagesize": page_size_feed,
+            }
+            if tag:
+                params["tag"] = tag
+            url = api_url + ("&" if "?" in api_url else "?") + urllib.parse.urlencode(params)
+            raw_path = output_dir / f"feed_tonghuashun_flash_{safe_name(name)}_{safe_name(tag or 'all')}_p{page}.json"
+            try:
+                data = fetch_json_url(url, timeout=timeout)
+                raw_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                raw_files.append(str(raw_path))
+                rows = (((data.get("data") or {}).get("list")) or [])
+                if str(data.get("code") or "") not in ("", "200"):
+                    raise RuntimeError(f"code={data.get('code')} msg={data.get('msg')}")
+            except Exception as exc:  # noqa: BLE001
+                messages.append(f"{name} page {page}: {exc}")
+                source_coverage["error"] = str(exc)
+                break
+            if not rows:
+                break
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                date_text = str(row.get("rtime") or row.get("ctime") or "").strip()
+                keep, stop, bucket, parsed = should_keep_feed_item(
+                    value=date_text,
+                    window_start=window_start,
+                    window_end=window_end,
+                )
+                note_coverage(source_coverage, parsed)
+                if stop:
+                    stop_feed = True
+                    continue
+                if not keep:
+                    continue
+                title = str(row.get("title") or "").strip()
+                content = choose_content(row.get("digest"), row.get("short"), title=title)
+                code = str(row.get("seq") or row.get("id") or "").strip()
+                url_value = str(row.get("url") or row.get("shareUrl") or row.get("appUrl") or "").strip()
+                key = dedupe_key_for_item(
+                    title=title,
+                    content=content,
+                    url=url_value,
+                    code=code,
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                item = {
+                    "index": len(items) + 1,
+                    "code": code,
+                    "title": title,
+                    "content": content or title,
+                    "content_quality": content_quality(title=title, content=content),
+                    "date": date_text,
+                    "source": "同花顺快讯",
+                    "type": name,
+                    "entity": ",".join(tag_item.get("name", "") for tag_item in (row.get("tagInfo") or []) if isinstance(tag_item, dict)),
+                    "url": url_value,
+                    "raw_file": str(raw_path),
+                    "bucket": bucket,
+                    "parsed_at": parsed.isoformat(timespec="seconds") if parsed else None,
+                }
+                items.append(item)
+                source_coverage["item_count"] += 1
+                counts[bucket] += 1
+                if smoke_source_done(source_coverage):
+                    stop_feed = True
+                    break
+            if stop_feed:
+                break
+
     for feed in feed_config.get("sina_7x24") or []:
         name = str(feed.get("name") or "新浪财经7x24")
         source_coverage = begin_coverage(
@@ -923,8 +1024,12 @@ def collect_eastmoney_feed_entry(
                     continue
                 if not keep:
                     continue
-                content = strip_html(row.get("rich_text") or "")
-                title = content[:80] or str(row.get("id") or "")
+                raw_content = strip_html(row.get("rich_text") or "")
+                bracket_title, bracket_body = split_bracketed_title_content(raw_content)
+                # Sina 7x24 often has no standalone title: the whole rich_text is
+                # the flash body. Do not truncate the body into a fake title.
+                title = bracket_title
+                content = bracket_body or raw_content
                 url_value = str(row.get("docurl") or "").strip()
                 key = dedupe_key_for_item(title=title, content=content, url=url_value, code=str(row.get("id") or ""))
                 if key in seen:
@@ -1008,7 +1113,7 @@ def collect_eastmoney_feed_entry(
                 if not keep:
                     continue
                 content = strip_html(row.get("content_text") or row.get("content") or "")
-                title = str(row.get("title") or "").strip() or content[:80]
+                title = str(row.get("title") or "").strip()
                 url_value = str(row.get("uri") or "").strip()
                 key = dedupe_key_for_item(title=title, content=content, url=url_value, code=str(row.get("id") or ""))
                 if key in seen:
@@ -1135,10 +1240,10 @@ def collect_eastmoney_feed_entry(
     if messages:
         stdout += "\n" + "\n".join(messages)
     return {
-        "id": "eastmoney_feed",
-        "skill": "eastmoney-feed",
-        "base_query": "东方财富资讯流按时间窗口分页采集",
-        "query": "东方财富资讯流按时间窗口分页采集",
+        "id": "market_feed",
+        "skill": "market-feed",
+        "base_query": "多源市场资讯流按时间窗口分页采集",
+        "query": "多源市场资讯流按时间窗口分页采集",
         "returncode": 0 if not messages else 1,
         "api_ok": not messages,
         "api_messages": messages,
@@ -1151,6 +1256,22 @@ def collect_eastmoney_feed_entry(
         "stderr_file": "",
         "raw_files": raw_files,
     }
+
+
+def collect_eastmoney_feed_entry(
+    *,
+    config: dict[str, Any],
+    output_dir: Path,
+    window_start: dt.datetime | None,
+    window_end: dt.datetime | None,
+) -> dict[str, Any] | None:
+    # Backward-compatible alias for older snapshot scripts/configs.
+    return collect_market_feed_entry(
+        config=config,
+        output_dir=output_dir,
+        window_start=window_start,
+        window_end=window_end,
+    )
 
 
 def inspect_api_files(raw_files: list[str]) -> tuple[bool, list[str]]:
@@ -1456,6 +1577,23 @@ def extract_json_object(text: str) -> dict[str, Any]:
     return json.loads(cleaned[start : end + 1])
 
 
+def market_scope_rule_for_phase(phase_label: str) -> str:
+    label = str(phase_label or "")
+    if "夜" in label or "晚" in label or "归档" in label or "复盘" in label:
+        return "夜间/综合复盘可以形成全天市场判断，但仍必须基于全天信息流证据，不得脱离材料。"
+    return (
+        "本阶段简报只能形成阶段性市场洞察，不能凭晨报、午报或收盘报某一阶段信息流下全天结论；"
+        "禁止写“今天市场如何”“全天判断”“今天不是/是……的一天”等全日定性。"
+    )
+
+
+def market_scope_rule_short_for_phase(phase_label: str) -> str:
+    label = str(phase_label or "")
+    if "夜" in label or "晚" in label or "归档" in label or "复盘" in label:
+        return "夜间/综合复盘可以形成全天判断，但必须基于全天证据。"
+    return "只能写阶段性市场洞察，不能把晨报、午报或收盘报上升为全天判断；禁止“今天市场如何/今天不是……的一天”等全日定性。"
+
+
 def build_openclaw_summary_prompt(
     *,
     phase_label: str,
@@ -1467,23 +1605,29 @@ def build_openclaw_summary_prompt(
         all_items=all_items,
         max_item_chars=max_item_chars,
     )
+    phase_scope_rule = market_scope_rule_for_phase(phase_label)
     return (
-        "你是财经信息日报编辑。任务不是投研判断，也不是交易建议，而是把原始信息压缩成有细节、有主线、克制可靠的高密度综述。\n"
-        "请基于原始消息，生成前后连贯、逻辑清晰的中文信息汇总。\n"
+        "你是市场信息流研判助手。任务不是财经媒体摘要，也不是交易建议，而是全面吸收阶段性信息流，过滤噪音，提炼对市场理解有帮助的洞察。\n"
+        "请基于原始消息，生成前后连贯、逻辑清晰、兼顾覆盖与降噪的阶段性市场洞察。\n"
         "规则：\n"
         "1. 只整理事实和消息含义，不预测涨跌，不给买卖建议。\n"
         "2. 不要按栏目拆分，不要写编号列表，不要输出信源、原文编号、状态、时间归类、信息类型等工程字段。\n"
         "3. 输入里的 content 是正文材料；title 只作为判断归类的辅助证据。content_quality 为 title_only/title_like 的消息要当作短快讯，不要扩写成不存在的正文。\n"
         "4. 只有当时间是消息报道的事件时间、截止时间、会议时间、披露时间等内容本身的一部分时，才写入整理正文。\n"
-        "5. 每段都必须包含具体主体、关键数字或明确事件细节；不能只写“热度较高、值得关注、提供线索、存在扰动”这类空话。\n"
-        "6. 对重复、同主题、跨信源的信息要合并表达，写出它们之间的关系：是互相印证、边际变化、分歧，还是同一事件的不同侧面。\n"
-        "7. 必须保留重要分歧和风险表述；遇到情绪化或观点化消息，要保留其观点属性，不把它写成事实。\n"
-        "8. 可以有轻度判断，但必须克制：判断只能来自原文中相邻事实的直接关系，不能上升到宏观结论或抽象判断。\n"
-        "9. 汇总部分写成 3-5 个自然段，每段 160-320 个中文字符；段落之间要有承接关系，像编辑写的日报正文，不像摘要拼接。\n"
-        "10. 判断句必须带证据，不要写没有原文支撑的因果、目的和趋势；优先使用“同时出现”“相互印证”“仍需区分”“尚不能推出”等低强度表达。\n"
-        "11. 禁止使用空泛或过度分析句，例如“后续值得关注”“整体来看”“提供线索”“需要继续观察”“共同指向”“出现错位”“对冲不确定性”“结构活跃”。\n"
-        "12. 不要为了显得有洞察而替消息下结论；如果只能看到并列事实，就写成并列事实，不要强行提炼大主题。\n"
-        "13. 返回严格 JSON，不要 Markdown，不要代码块。\n"
+        "4a. 窗口时间只用于后台筛选，禁止在正文里说明“本次窗口”“补发/重跑”“没有混入某时间之后的新闻”等工程口径。\n"
+        f"4b. {phase_scope_rule}\n"
+        "4c. 不要教条化：以下覆盖类别只是后台检查工具，不是前台填空模板；没有增量的类别可以不写，低价值信息不能为凑覆盖而进入总览。\n"
+        "5. 目标是全面但降噪：高频重复只合并写一次；低频但有订单、审批、政策、监管、价格异动、产业链数据、出海验证的信息要进入候选池。\n"
+        "6. 每段都必须包含具体主体、关键数字或明确事件细节；不能只写“热度较高、值得关注、提供线索、存在扰动”这类空话。\n"
+        "7. 对重复、同主题、跨信源的信息要合并表达，写出它们之间的关系：是互相印证、边际变化、分歧，还是同一事件的不同侧面。\n"
+        "8. 必须保留重要分歧和风险表述；遇到情绪化或观点化消息，要保留其观点属性，不把它写成事实。\n"
+        "9. 可以有市场洞察，但必须克制：判断只能来自原文中相邻事实的直接关系，不能从阶段信息流上升为全天结论。\n"
+        "10. 汇总部分默认写成 4-6 个自然段，每段 180-360 个中文字符；但段落数是弹性建议，不是硬性上限。若信息密度确实需要，可以超过 6 段，但不能靠空话扩段。段落之间要有承接关系，像读完信息流后的市场理解，不像摘要拼接。\n"
+        "11. 判断句必须带证据，不要写没有原文支撑的因果、目的和趋势；优先使用“这一阶段的信息流显示”“截至本阶段”“仍需区分”“尚不能推出”等低强度表达。\n"
+        "12. 禁止使用空泛或过度分析句，例如“后续值得关注”“整体来看”“提供线索”“需要继续观察”“共同指向”“出现错位”“对冲不确定性”“结构活跃”。\n"
+        "13. 禁止出现后台写作/批改口吻，例如“不该写成”“不能简单归纳为”“后续简报应”“真正要保留的判断是”。\n"
+        "14. 不要为了显得有洞察而替消息下结论；如果只能看到并列事实，就写成并列事实，不要强行提炼大主题。\n"
+        "15. 返回严格 JSON，不要 Markdown，不要代码块。\n"
         "JSON 格式：\n"
         '{"summary_paragraphs":["...","..."],"observation":{"repeated_words":["..."],"multi_day_themes":["..."],"watch_next":["..."]}}\n'
         f"阶段：{phase_label}\n"
@@ -1542,16 +1686,22 @@ def build_openclaw_chunked_messages(
     )
     payload_text = json.dumps(payload_items, ensure_ascii=False)
     chunks = chunk_text(payload_text, chunk_chars)
+    phase_scope_rule = market_scope_rule_short_for_phase(phase_label)
     messages = [
         (
-            "你是财经信息日报编辑。任务不是投研判断，也不是交易建议，而是把原始信息压缩成有细节、有主线、克制可靠的高密度综述。\n"
+            "你是市场信息流研判助手。任务不是财经媒体摘要，也不是交易建议，而是全面吸收阶段性信息流，过滤噪音，提炼对市场理解有帮助的洞察。\n"
             "接下来我会分片发送原始消息 JSON。请先只确认已接收，不要生成日报。\n"
-            "最终要求：生成前后连贯、逻辑清晰的中文信息汇总；不要按栏目拆分，不要写编号列表；"
+            "最终要求：生成前后连贯、逻辑清晰、兼顾覆盖与降噪的阶段性市场洞察；不要按栏目拆分，不要写编号列表；"
             "输入里的content是正文材料，title只作归类辅助；content_quality为title_only/title_like的消息按短快讯处理，不要扩写；"
+            "窗口时间只用于后台筛选，禁止在正文里说明本次窗口、补发/重跑、没有混入某时间之后的新闻等工程口径；"
+            f"{phase_scope_rule}"
+            "不要教条化：覆盖类别只是后台检查工具，不是前台填空模板；没有增量的类别可以不写，低价值信息不能为凑覆盖而进入总览；"
+            "全面但降噪：高频重复只合并写一次；低频但有订单、审批、政策、监管、价格异动、产业链数据、出海验证的信息要进入候选池；"
             "每段必须包含具体主体、关键数字或明确事件细节；重复和同主题信息要合并出互相印证、边际变化、分歧或同一事件不同侧面；"
-            "可以有轻度判断，但判断只能来自原文中相邻事实的直接关系，不能上升到宏观结论或抽象判断；"
-            "优先使用“同时出现”“相互印证”“仍需区分”“尚不能推出”等低强度表达；"
+            "可以有市场洞察，但判断只能来自原文中相邻事实的直接关系，不能从阶段信息流上升为全天结论；"
+            "优先使用“这一阶段的信息流显示”“截至本阶段”“同时出现”“相互印证”“仍需区分”“尚不能推出”等低强度表达；"
             "禁止空泛或过度分析句，例如“后续值得关注”“整体来看”“提供线索”“需要继续观察”“共同指向”“出现错位”“对冲不确定性”“结构活跃”；"
+            "禁止后台写作/批改口吻，例如“不该写成”“不能简单归纳为”“后续简报应”“真正要保留的判断是”；"
             "如果只能看到并列事实，就写成并列事实，不要强行提炼大主题；返回严格 JSON，不要 Markdown。\n"
             'JSON格式：{"summary_paragraphs":["...","..."],"observation":'
             '{"repeated_words":["..."],"multi_day_themes":["..."],"watch_next":["..."]}}\n'
@@ -1565,7 +1715,7 @@ def build_openclaw_chunked_messages(
     messages.append(
         "以上原始消息已经发送完毕。现在请根据全部分片生成最终 JSON。"
         "只返回 JSON 对象，不要 Markdown，不要代码块。"
-        "质量要求：3-5 个自然段，每段 160-320 个中文字符；每段至少包含两个具体事实颗粒，不能写空泛综述，也不能强行拔高判断。"
+        "质量要求：默认 4-6 个自然段，每段 180-360 个中文字符；段落数是弹性建议，不是硬性上限，信息密度确实需要时可以超过 6 段；每段至少包含两个具体事实颗粒，不能写空泛综述，也不能把阶段信息流拔高为全天判断。"
     )
     return messages
 
@@ -1653,7 +1803,11 @@ def generate_openclaw_digest(
             )
             digest = extract_json_object(text)
             summary_paragraphs = normalize_summary_paragraphs(digest)
-            quality_warnings = summary_quality_warnings(summary_paragraphs, all_items)
+            quality_warnings = summary_quality_warnings(
+                summary_paragraphs,
+                all_items,
+                phase_label=phase_label,
+            )
             if quality_warnings and attempt < retries:
                 last_error = "low quality summary: " + "; ".join(quality_warnings)
                 time.sleep(5)
@@ -1712,16 +1866,69 @@ def normalize_summary_paragraphs(digest: dict[str, Any]) -> list[str]:
     return []
 
 
-def summary_quality_warnings(paragraphs: list[str], all_items: list[dict[str, Any]]) -> list[str]:
+def summary_quality_warnings(
+    paragraphs: list[str],
+    all_items: list[dict[str, Any]],
+    *,
+    phase_label: str = "",
+) -> list[str]:
     if not paragraphs:
         return ["empty summary"]
 
     text = "".join(paragraphs)
     warnings: list[str] = []
+    if len(all_items) >= 30 and len(paragraphs) < 4:
+        warnings.append("summary has too few paragraphs for market insight overview")
+    if len(paragraphs) > 8:
+        warnings.append("summary may be too fragmented; paragraph count exceeds flexible range")
     if len(all_items) >= 8 and len(text) < 480:
         warnings.append("summary too short for item volume")
     if len(all_items) >= 8 and not re.search(r"\d", text):
         warnings.append("summary has no numeric detail")
+
+    meta_phrases = [
+        "本次窗口",
+        "早报窗口",
+        "晨报窗口",
+        "午报窗口",
+        "收盘报窗口",
+        "晚报窗口",
+        "补发",
+        "重跑",
+        "没有混入",
+        "未混入",
+        "窗口固定",
+    ]
+    meta_hits = [phrase for phrase in meta_phrases if phrase in text]
+    if meta_hits:
+        warnings.append("summary leaks backend window/delivery wording: " + "、".join(meta_hits[:5]))
+
+    backend_phrases = [
+        "不该写成",
+        "不能简单归纳为",
+        "后续简报应",
+        "真正要保留的判断是",
+        "财经编辑",
+        "作为编辑",
+        "摘要应该",
+    ]
+    backend_hits = [phrase for phrase in backend_phrases if phrase in text]
+    if backend_hits:
+        warnings.append("summary leaks drafting/meta commentary: " + "、".join(backend_hits[:5]))
+
+    if "夜" not in str(phase_label) and "晚" not in str(phase_label) and "复盘" not in str(phase_label):
+        all_day_phrases = [
+            "今天市场",
+            "全天判断",
+            "全天来看",
+            "全日",
+            "今天不是",
+            "今天是",
+            "这一整天",
+        ]
+        all_day_hits = [phrase for phrase in all_day_phrases if phrase in text]
+        if all_day_hits:
+            warnings.append("stage summary makes all-day judgment: " + "、".join(all_day_hits[:5]))
 
     generic_phrases = [
         "整体来看",
@@ -1785,6 +1992,10 @@ def append_summary_digest(
 
 
 def append_raw_message_flow(lines: list[str], items: list[dict[str, Any]]) -> None:
+    while len(lines) >= 2 and not lines[-1].strip():
+        if lines[-2].strip() == "## 原始消息流":
+            return
+        break
     lines.append("## 原始消息流")
     lines.append("")
     if not items:
@@ -1792,11 +2003,19 @@ def append_raw_message_flow(lines: list[str], items: list[dict[str, Any]]) -> No
         lines.append("")
         return
     for item in items:
-        title = " ".join(str(item.get("title") or "[无标题]").split())
+        title = " ".join(str(item.get("title") or "").split())
         content = " ".join(str(item.get("content") or "").split())
+        source = str(item.get("source") or "").strip()
+        if source == "新浪财经" and title and (
+            title == content or (len(title) >= 50 and content.startswith(title))
+        ):
+            # Legacy/fallback Sina rows often had no title and used the first
+            # characters of the body as title. Render them as no-title flashes.
+            title = ""
+        display_title = f"{item['serial']}. {title}" if title else str(item["serial"])
         body = display_body_without_title(title=title, content=content)
         meta = raw_message_meta_line(item)
-        lines.append(f"### {item['serial']}. {title}")
+        lines.append(f"### {display_title}")
         lines.append("")
         if body:
             lines.append(body)
@@ -1824,7 +2043,26 @@ def write_markdown_report(
 
     append_summary_digest(lines, openclaw_digest, all_items)
     append_raw_message_flow(lines, all_items)
+    lines = collapse_duplicate_section_headings(lines)
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def collapse_duplicate_section_headings(lines: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    last_heading = ""
+    only_blank_since_heading = False
+    for line in lines:
+        if line.startswith("## "):
+            if only_blank_since_heading and line == last_heading:
+                continue
+            last_heading = line
+            only_blank_since_heading = True
+            cleaned.append(line)
+            continue
+        if line.strip():
+            only_blank_since_heading = False
+        cleaned.append(line)
+    return cleaned
 
 
 def notion_text(text: str) -> list[dict[str, Any]]:
@@ -1908,18 +2146,31 @@ def notion_request(
     if payload is not None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    request = urllib.request.Request(
-        url,
-        data=body,
-        method=method,
-        headers=headers,
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        details = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Notion API {exc.code}: {details}") from exc
+    last_error: Exception | None = None
+    for attempt in range(5):
+        request = urllib.request.Request(
+            url,
+            data=body,
+            method=method,
+            headers=headers,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            details = exc.read().decode("utf-8", errors="replace")
+            last_error = RuntimeError(f"Notion API {exc.code}: {details}")
+            if exc.code == 429 or 500 <= exc.code <= 599:
+                retry_after = exc.headers.get("Retry-After")
+                try:
+                    delay = float(retry_after) if retry_after else min(2**attempt, 15)
+                except ValueError:
+                    delay = min(2**attempt, 15)
+                time.sleep(delay)
+                continue
+            raise last_error from exc
+    assert last_error is not None
+    raise last_error
 
 
 def list_notion_children(block_id: str, token: str, timeout: int) -> list[dict[str, Any]]:
@@ -1945,13 +2196,19 @@ def replace_notion_page_children(page_id: str, token: str, blocks: list[dict[str
         child_id = child.get("id")
         if not child_id:
             continue
-        notion_request(
-            method="PATCH",
-            url=f"https://api.notion.com/v1/blocks/{child_id}",
-            token=token,
-            timeout=timeout,
-            payload={"archived": True},
-        )
+        try:
+            notion_request(
+                method="PATCH",
+                url=f"https://api.notion.com/v1/blocks/{child_id}",
+                token=token,
+                timeout=timeout,
+                payload={"archived": True},
+            )
+        except RuntimeError as exc:
+            # Notion may return recently archived children during pagination. Treat
+            # those as already deleted so reentrant updates do not fail midway.
+            if "Can't edit block that is archived" not in str(exc):
+                raise
     for i in range(0, len(blocks), 80):
         notion_request(
             method="PATCH",
@@ -1975,6 +2232,15 @@ def find_notion_child_page_by_title(
         if child_title == wanted:
             return child
     return None
+
+
+def retrieve_notion_page(page_id: str, token: str, timeout: int) -> dict[str, Any]:
+    return notion_request(
+        method="GET",
+        url=f"https://api.notion.com/v1/pages/{page_id}",
+        token=token,
+        timeout=timeout,
+    )
 
 
 def report_title_for_phase(*, report_path: Path, phase: str, phase_label: str) -> str:
@@ -2036,9 +2302,13 @@ def publish_notion_page(
         page_id = str(existing_publication.get("page_id"))
         try:
             replace_notion_page_children(page_id, token, blocks, timeout)
+            page_payload: dict[str, Any] = {}
+            if not existing_publication.get("url"):
+                page_payload = retrieve_notion_page(page_id, token, timeout)
             publication_state[publication_key] = {
                 **existing_publication,
                 "title": title,
+                "url": existing_publication.get("url") or page_payload.get("url"),
                 "updated_at": now_local().isoformat(timespec="seconds"),
                 "report_path": str(report_path),
             }
@@ -2052,7 +2322,7 @@ def publish_notion_page(
                 "updated_existing": True,
                 "publication_key": publication_key,
                 "page_id": page_id,
-                "url": existing_publication.get("url"),
+                "url": existing_publication.get("url") or page_payload.get("url"),
                 "title": title,
                 "block_count": len(blocks),
             }
@@ -2071,11 +2341,27 @@ def publish_notion_page(
         timeout=timeout,
     )
     if existing_page and existing_page.get("id"):
+        page_id = str(existing_page["id"])
+        page_payload: dict[str, Any] = {}
+        try:
+            replace_notion_page_children(page_id, token, blocks, timeout)
+            page_payload = retrieve_notion_page(page_id, token, timeout)
+        except Exception as exc:
+            return {
+                "enabled": True,
+                "attempted": True,
+                "error": str(exc),
+                "publication_key": publication_key,
+                "page_id": page_id,
+                "title": title,
+                "source": "notion_title_check",
+            }
         publication_state[publication_key] = {
-            "page_id": existing_page["id"],
-            "url": existing_page.get("url"),
+            "page_id": page_id,
+            "url": page_payload.get("url") or existing_page.get("url"),
             "title": title,
             "published_at": now_local().isoformat(timespec="seconds"),
+            "updated_at": now_local().isoformat(timespec="seconds"),
             "report_path": str(report_path),
             "discovered_from_notion": True,
         }
@@ -2089,12 +2375,13 @@ def publish_notion_page(
         return {
             "enabled": True,
             "attempted": True,
-            "skipped_duplicate": True,
-            "reason": "same title already exists under Notion parent",
+            "updated_existing": True,
+            "discovered_from_notion": True,
             "publication_key": publication_key,
-            "page_id": existing_page["id"],
-            "url": existing_page.get("url"),
+            "page_id": page_id,
+            "url": page_payload.get("url") or existing_page.get("url"),
             "title": title,
+            "block_count": len(blocks),
             "source": "notion_title_check",
         }
 
@@ -2181,6 +2468,56 @@ def deliver_report(
         f"{'Notion：' + notion_url if notion_url else 'Markdown 简报已生成。'}\n"
         f"manifest: {manifest_path}"
     )
+    if str(telegram.get("channel") or "telegram") == "telegram" and str(
+        telegram.get("delivery_method") or ""
+    ).strip().lower() == "bot_api":
+        started = now_local().isoformat(timespec="seconds")
+        try:
+            openclaw_config_path = Path(
+                telegram.get("openclaw_config_path") or "~/.openclaw/openclaw.json"
+            ).expanduser()
+            openclaw_config = json.loads(openclaw_config_path.read_text(encoding="utf-8"))
+            bot_token = (
+                (openclaw_config.get("channels") or {}).get("telegram") or {}
+            ).get("botToken")
+            if not bot_token:
+                return {
+                    "enabled": True,
+                    "attempted": False,
+                    "reason": "missing channels.telegram.botToken",
+                }
+            chat_id = target.removeprefix("telegram:")
+            body = urllib.parse.urlencode(
+                {
+                    "chat_id": chat_id,
+                    "text": message,
+                    "disable_web_page_preview": "false",
+                }
+            ).encode("utf-8")
+            request = urllib.request.Request(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            with urllib.request.urlopen(request, timeout=int(telegram.get("timeout") or 120)) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            return {
+                "enabled": True,
+                "attempted": True,
+                "started_at": started,
+                "returncode": 0 if payload.get("ok") else 1,
+                "provider": "telegram_bot_api",
+                "message_id": ((payload.get("result") or {}).get("message_id")),
+            }
+        except Exception as exc:  # noqa: BLE001 - delivery is best effort
+            return {
+                "enabled": True,
+                "attempted": True,
+                "started_at": started,
+                "provider": "telegram_bot_api",
+                "exception": str(exc),
+            }
     cmd = [
         str(openclaw_bin),
         "message",
@@ -2285,8 +2622,9 @@ def main() -> int:
         "end": window_end.isoformat(timespec="seconds") if window_end else None,
         "source": window_source,
     }
-    day = started.strftime("%Y-%m-%d")
-    date_slug = started.strftime("%Y%m%d")
+    report_clock = window_end or started
+    day = report_clock.strftime("%Y-%m-%d")
+    date_slug = report_clock.strftime("%Y%m%d")
     stamp = started.strftime("%Y%m%d_%H%M%S")
     # Canonical daily phase output: one report/manifest per day+phase.
     # Retries update the same files instead of creating a new markdown on every failed attempt.
@@ -2301,7 +2639,7 @@ def main() -> int:
         d.mkdir(parents=True, exist_ok=True)
 
     entries: list[dict[str, Any]] = []
-    feed_entry = collect_eastmoney_feed_entry(
+    feed_entry = collect_market_feed_entry(
         config=config,
         output_dir=skill_output_dir,
         window_start=window_start,
@@ -2481,6 +2819,17 @@ def main() -> int:
     print(f"entries={len(entries)}")
     if delivery.get("attempted"):
         print(f"delivery_returncode={delivery.get('returncode', 'exception')}")
+    telegram_config = config.get("telegram") or {}
+    if args.phase != "smoke" and telegram_config.get("enabled") and delivery.get("attempted"):
+        delivery_failed = delivery.get("exception") or (
+            delivery.get("returncode") is not None and int(delivery.get("returncode") or 0) != 0
+        )
+        if delivery_failed:
+            print(
+                f"telegram_delivery_failed={delivery.get('exception') or delivery.get('stderr') or delivery.get('returncode')}",
+                file=sys.stderr,
+            )
+            return 7
     notion_config = config.get("notion") or {}
     if args.phase != "smoke" and notion_config.get("enabled"):
         if not notion_delivery.get("attempted") or notion_delivery.get("error"):
