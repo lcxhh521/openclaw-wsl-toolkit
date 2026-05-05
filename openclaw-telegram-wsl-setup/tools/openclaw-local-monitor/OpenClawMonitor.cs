@@ -248,7 +248,6 @@ namespace OpenClawLocalMonitor
         Label taskHeader;
         Label sessionHeader;
         Label logHeader;
-        Button refreshButton;
         Button diagnosticsButton;
         Button openClawPowerButton;
         CheckBox clashSafeModeCheck;
@@ -311,7 +310,7 @@ namespace OpenClawLocalMonitor
             SetupTray();
             closePreference = LoadClosePreference();
             timer.Interval = 30000;
-            timer.Tick += async (s, e) => await RefreshAsync(false);
+            timer.Tick += async (s, e) => await RefreshAsync();
             timer.Start();
             clashTimer.Interval = 2500;
             clashTimer.Tick += async (s, e) => await EnsureClashSafeModeAsync(false);
@@ -322,7 +321,7 @@ namespace OpenClawLocalMonitor
                 Invalidate(true);
                 Update();
                 await EnsureClashSafeModeAsync(true);
-                await RefreshAsync(false);
+                await RefreshAsync();
             };
             FormClosing += OnFormClosing;
         }
@@ -486,10 +485,10 @@ namespace OpenClawLocalMonitor
             trayMenu.Items.Add("打开 Control", null, (s, e) => OpenControl());
             clashSafeModeTrayItem = new ToolStripMenuItem("Clash 安全模式", null, async (s, e) => await ToggleClashSafeModeAsync()) { Checked = clashSafeModeEnabled };
             trayMenu.Items.Add(clashSafeModeTrayItem);
-            trayMenu.Items.Add("重新检测", null, async (s, e) =>
+            trayMenu.Items.Add("诊断", null, async (s, e) =>
             {
                 ShowFromTray();
-                await RefreshAsync(true);
+                await RefreshDiagnosticsAsync();
             });
             trayMenu.Items.Add(new ToolStripSeparator());
             trayMenu.Items.Add("退出控制中心", null, (s, e) =>
@@ -635,20 +634,6 @@ namespace OpenClawLocalMonitor
             AddBoundedHoverTip(clashSafeModeCheck, "用于开全局/TUN 后国内应用或链接受影响的场景；没开全局/TUN 时通常不用开启，开启后 OpenClaw/Codex 跟随 GLOBAL，微信和国内连接按规则直连。");
             Controls.Add(clashSafeModeCheck);
 
-            refreshButton = new Button
-            {
-                Text = "重新检测",
-                Location = new Point(1090, 20),
-                Size = new Size(92, 36),
-                BackColor = Color.FromArgb(37, 99, 235),
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat
-            };
-            refreshButton.FlatAppearance.BorderSize = 0;
-            refreshButton.Click += async (s, e) => await RefreshAsync(true);
-            AddBoundedHoverTip(refreshButton, "只读重查状态；不启动 gateway、不改配置、不重置任务。");
-            Controls.Add(refreshButton);
-
             var hero = new RoundedPanel
             {
                 Location = new Point(28, 92),
@@ -686,25 +671,32 @@ namespace OpenClawLocalMonitor
             overall = new Card("状态", 28, 232, 176, 88);
             gateway = new Card("网关", 220, 232, 176, 88);
             telegram = new Card("Telegram", 412, 232, 176, 88);
-            tasks = new Card("后台任务", 604, 232, 176, 88);
+            tasks = new Card("后台活动", 604, 232, 176, 88);
             audit = new Card("提醒", 796, 232, 176, 88);
             session = new Card("最近活动", 988, 232, 194, 88);
             Controls.AddRange(new Control[] { overall.Panel, gateway.Panel, telegram.Panel, tasks.Panel, audit.Panel, session.Panel });
 
-            Controls.Add(MakeLabel("Token / 成本流向", 28, 344, 260, 24, 12f, Color.FromArgb(15, 23, 42), true));
+            tokenHeader = MakeLabel("Token / 成本流向", 28, 344, 260, 24, 12f, Color.FromArgb(15, 23, 42), true);
+            tokenHeader.Visible = false;
+            Controls.Add(tokenHeader);
             tokenTotal = new Card("上下文占用", 28, 376, 142, 84);
             tokenInput = new Card("输入 Token", 184, 376, 142, 84);
             tokenOutput = new Card("输出 Token", 340, 376, 142, 84);
             tokenCache = new Card("缓存读取", 496, 376, 142, 84);
             tokenCost = new Card("已记录成本", 652, 376, 128, 84);
             Controls.AddRange(new Control[] { tokenTotal.Panel, tokenInput.Panel, tokenOutput.Panel, tokenCache.Panel, tokenCost.Panel });
+            foreach (var card in new[] { tokenTotal, tokenInput, tokenOutput, tokenCache, tokenCost })
+                card.Panel.Visible = false;
             AddCostHint();
 
-            Controls.Add(MakeLabel("后台任务状态", 28, 486, 260, 24, 12f, Color.FromArgb(15, 23, 42), true));
+            taskHeader = MakeLabel("后台活动状态", 28, 486, 260, 24, 12f, Color.FromArgb(15, 23, 42), true);
+            taskHeader.Visible = false;
+            Controls.Add(taskHeader);
             taskGrid = new SmoothDataGridView
             {
                 Location = new Point(28, 516),
                 Size = new Size(1154, 150),
+                Visible = false,
                 BackgroundColor = Color.White,
                 GridColor = Color.FromArgb(226, 232, 240),
                 ForeColor = Color.FromArgb(31, 41, 55),
@@ -801,22 +793,20 @@ namespace OpenClawLocalMonitor
 
         void LayoutUi()
         {
-            if (refreshButton == null || taskGrid == null) return;
+            if (diagnosticsButton == null || taskGrid == null) return;
             SuspendLayout();
             try
             {
                 var compact = ClientSize.Width < 1180;
                 var margin = compact ? 18 : 28;
                 var gap = compact ? 10 : 16;
-                var refreshWidth = compact ? 86 : 92;
                 var diagnosticsWidth = compact ? 68 : 72;
                 var openControlWidth = compact ? 104 : 112;
                 var openClawPowerWidth = compact ? 122 : 130;
                 var contentWidth = Math.Max(760, ClientSize.Width - margin * 2);
                 var clientHeight = Math.Max(680, ClientSize.Height);
 
-                refreshButton.SetBounds(margin + contentWidth - refreshWidth, 20, refreshWidth, 36);
-                diagnosticsButton.SetBounds(refreshButton.Left - gap - diagnosticsWidth, 20, diagnosticsWidth, 36);
+                diagnosticsButton.SetBounds(margin + contentWidth - diagnosticsWidth, 20, diagnosticsWidth, 36);
                 openControlButton.SetBounds(diagnosticsButton.Left - gap - openControlWidth, 20, openControlWidth, 36);
                 openClawPowerButton.SetBounds(openControlButton.Left - gap - openClawPowerWidth, 20, openClawPowerWidth, 36);
                 var clashLeft = margin + (compact ? 330 : 390);
@@ -866,28 +856,25 @@ namespace OpenClawLocalMonitor
                 }
                 y += ((topCards.Length + topColumns - 1) / topColumns) * 104 + 8;
 
-                MoveDirectLabelFromOriginalY(344, margin, y, 260, 24);
-                y += 32;
-                var tokenCards = new[] { tokenTotal, tokenInput, tokenOutput, tokenCache, tokenCost };
-                var tokenGap = contentWidth >= 1120 ? gap : 12;
-                var tokenCardWidth = (contentWidth - tokenGap * (tokenCards.Length - 1)) / tokenCards.Length;
-                for (var i = 0; i < tokenCards.Length; i++)
-                    tokenCards[i].SetBounds(margin + i * (tokenCardWidth + tokenGap), y, tokenCardWidth, 84);
-                y += 110;
+                if (tokenHeader != null) tokenHeader.Visible = false;
+                foreach (var card in new[] { tokenTotal, tokenInput, tokenOutput, tokenCache, tokenCost })
+                {
+                    card.Panel.Visible = false;
+                    card.SetBounds(margin, y, 1, 1);
+                }
 
                 if (costHintPopup != null)
                 {
                     var hintWidth = Math.Min(530, contentWidth);
-                    costHintPopup.SetBounds(Math.Min(tokenCost.Panel.Left, margin + contentWidth - hintWidth), tokenCost.Panel.Bottom + 8, hintWidth, 56);
+                    costHintPopup.Visible = false;
+                    costHintPopup.SetBounds(margin, y, hintWidth, 56);
                 }
 
-                MoveDirectLabelFromOriginalY(486, margin, y, 260, 24);
-                y += 30;
-                var lowerArea = 178;
-                var bottomArea = 58;
-                var gridHeight = Math.Max(130, Math.Min(260, clientHeight - y - lowerArea - bottomArea));
+                var gridHeight = 0;
                 taskGrid.SetBounds(margin, y, contentWidth, gridHeight);
-                y += gridHeight + 34;
+                taskGrid.Visible = false;
+                if (taskHeader != null) taskHeader.Visible = false;
+                y += 8;
 
                 var halfWidth = (contentWidth - gap) / 2;
                 MoveDirectLabelFromOriginalY(692, margin, y, halfWidth, 24);
@@ -964,18 +951,15 @@ namespace OpenClawLocalMonitor
             };
         }
 
-        async Task RefreshAsync(bool manualRecovery)
+        async Task RefreshAsync()
         {
             if (refreshing) return;
             refreshing = true;
-            if (manualRecovery)
-                updated.Text = "重新检测中...";
-            else if (togglingOpenClaw)
+            if (togglingOpenClaw)
                 updated.Text = lastOpenClawServiceActive ? "关闭中..." : "启动中...";
-            refreshButton.Enabled = false;
             try
             {
-                var snapshot = await Task.Run(() => BuildSnapshot(manualRecovery));
+                var snapshot = await Task.Run(() => BuildSnapshot());
                 Render(snapshot);
             }
             catch (Exception ex)
@@ -986,7 +970,6 @@ namespace OpenClawLocalMonitor
             finally
             {
                 refreshing = false;
-                refreshButton.Enabled = true;
                 UpdateOpenClawPowerUi();
             }
         }
@@ -1094,6 +1077,9 @@ namespace OpenClawLocalMonitor
         {
             try
             {
+                var gatewayPid = "";
+                var gatewayUptime = "";
+                var gatewayStarted = "";
                 var proc = GetGatewayProcessSnapshotReadonly();
                 if (proc.Item1)
                 {
@@ -1111,6 +1097,9 @@ namespace OpenClawLocalMonitor
                         double rssMb = ToDouble(rss) / 1024.0;
                         var changed = !string.IsNullOrWhiteSpace(lastDiagnosticsGatewayPid) && lastDiagnosticsGatewayPid != pid;
                         lastDiagnosticsGatewayPid = pid;
+                        gatewayPid = pid;
+                        gatewayUptime = etime;
+                        gatewayStarted = started;
 
                         d.GatewayResilience.Add(new DiagnosticItem("Gateway PID", pid + " / ppid " + ppid, changed ? "Warn" : "Good", changed ? "本次诊断发现 PID 与上次不同" : "当前 gateway 进程", "ps"));
                         d.GatewayResilience.Add(new DiagnosticItem("Gateway uptime", etime, "Good", "当前进程运行时长", "ps"));
@@ -1131,6 +1120,12 @@ namespace OpenClawLocalMonitor
                 if (stability.Item1 && !string.IsNullOrWhiteSpace(stability.Item2))
                 {
                     var count = 0;
+                    var rows = new List<DiagnosticItem>();
+                    var latestReason = "";
+                    var latestPid = "";
+                    var latestTimestamp = "";
+                    var latestName = "";
+                    var timelineState = "Good";
                     foreach (var line in stability.Item2.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries).Take(5))
                     {
                         var columns = line.Split(new[] { '\t' }, 2);
@@ -1140,15 +1135,38 @@ namespace OpenClawLocalMonitor
                         var timestamp = match.Success ? match.Groups[1].Value : modified;
                         var pid = match.Success ? match.Groups[2].Value : "-";
                         var reason = match.Success ? match.Groups[3].Value : name;
-                        var state = Regex.IsMatch(reason, "stop_shutdown_timeout|SIGKILL|killed|startup_failed", RegexOptions.IgnoreCase) ? "Risk" :
-                            Regex.IsMatch(reason, "restart|SIGTERM|timeout", RegexOptions.IgnoreCase) ? "Warn" : "Good";
-                        d.GatewayResilience.Add(new DiagnosticItem("Stability file", reason + " · pid " + pid, state, timestamp + " · " + name, "stability files"));
+                        var recoveredToCurrentGateway = !string.IsNullOrWhiteSpace(gatewayPid) && pid != "-" && pid != gatewayPid;
+                        var state = StabilityEventState(reason, pid, gatewayPid);
+                        timelineState = CombineDiagnosticState(timelineState, state);
+                        if (count == 0)
+                        {
+                            latestReason = reason;
+                            latestPid = pid;
+                            latestTimestamp = timestamp;
+                            latestName = name;
+                        }
+                        rows.Add(new DiagnosticItem("Stability file", reason + " · pid " + pid, state, StabilityEventDetail(timestamp, name) + (recoveredToCurrentGateway ? " · 当前 gateway 已恢复到 pid " + gatewayPid : ""), "stability files"));
                         count++;
                     }
-                    if (count == 0) d.GatewayResilience.Add(new DiagnosticItem("Stability files", "无记录", "Good", "未发现 stability json", "stability files"));
+                    if (count > 0)
+                    {
+                        var timeline = "current pid " + (string.IsNullOrWhiteSpace(gatewayPid) ? "unknown" : gatewayPid);
+                        if (!string.IsNullOrWhiteSpace(gatewayUptime)) timeline += " · uptime " + gatewayUptime;
+                        if (!string.IsNullOrWhiteSpace(gatewayStarted)) timeline += " · started " + gatewayStarted;
+                        var recoveredLatest = !string.IsNullOrWhiteSpace(gatewayPid) && latestPid != "-" && latestPid != gatewayPid;
+                        var latestDetail = StabilityEventDetail(latestTimestamp, latestName) + (recoveredLatest ? " · 当前 gateway 已恢复到 pid " + gatewayPid : "");
+                        d.GatewayResilience.Add(new DiagnosticItem("Restart timeline", timeline, timelineState, "latest stability: " + latestReason + " · pid " + latestPid + " · " + latestDetail, "ps + stability files"));
+                        foreach (var row in rows) d.GatewayResilience.Add(row);
+                    }
+                    else
+                    {
+                        d.GatewayResilience.Add(new DiagnosticItem("Restart timeline", string.IsNullOrWhiteSpace(gatewayPid) ? "无当前 PID" : "current pid " + gatewayPid, "Good", "未发现 stability json", "ps + stability files"));
+                        d.GatewayResilience.Add(new DiagnosticItem("Stability files", "无记录", "Good", "未发现 stability json", "stability files"));
+                    }
                 }
                 else if (stability.Item1)
                 {
+                    d.GatewayResilience.Add(new DiagnosticItem("Restart timeline", string.IsNullOrWhiteSpace(gatewayPid) ? "无当前 PID" : "current pid " + gatewayPid, "Good", "未发现 stability json", "ps + stability files"));
                     d.GatewayResilience.Add(new DiagnosticItem("Stability files", "无记录", "Good", "未发现 stability json", "stability files"));
                 }
                 else
@@ -1397,10 +1415,56 @@ namespace OpenClawLocalMonitor
         Tuple<bool, string, string> GetGatewayStabilityFilesReadonly()
         {
             var script =
-                "[ -d ~/.openclaw/logs/stability ] || exit 0\n" +
-                "ls -1t ~/.openclaw/logs/stability/*.json 2>/dev/null | head -5 | sed 's#.*/##'";
+                "if [ ! -d ~/.openclaw/logs/stability ]; then exit 0; fi\n" +
+                "find ~/.openclaw/logs/stability -maxdepth 1 -type f -name '*.json' -printf '%T@\\t%f\\n' 2>/dev/null | sort -nr | head -5";
             var result = RunProcess("wsl.exe", new[] { "-d", WslDistro, "--", "bash", "-lc", script }, 3000);
             return Tuple.Create(result.Ok, result.Stdout, result.Stderr + result.Error);
+        }
+
+        string StabilityEventState(string reason, string eventPid, string currentGatewayPid)
+        {
+            var serious = Regex.IsMatch(reason ?? "", "stop_shutdown_timeout|SIGKILL|killed|startup_failed", RegexOptions.IgnoreCase);
+            var warning = Regex.IsMatch(reason ?? "", "restart|SIGTERM|timeout", RegexOptions.IgnoreCase);
+            var currentGatewayRunning = !string.IsNullOrWhiteSpace(currentGatewayPid);
+            var eventBelongsToPreviousGateway = currentGatewayRunning && !string.IsNullOrWhiteSpace(eventPid) && eventPid != "-" && eventPid != currentGatewayPid;
+            if (serious) return eventBelongsToPreviousGateway ? "Warn" : "Risk";
+            if (warning) return "Warn";
+            return "Good";
+        }
+
+        static string CombineDiagnosticState(string current, string next)
+        {
+            if (current == "Risk" || next == "Risk") return "Risk";
+            if (current == "Warn" || next == "Warn") return "Warn";
+            if (current == "Confirm" || next == "Confirm") return "Confirm";
+            if (current == "Unknown" || next == "Unknown") return "Unknown";
+            return "Good";
+        }
+
+        string StabilityEventDetail(string timestamp, string name)
+        {
+            var ageMs = StabilityTimestampAgeMs(timestamp);
+            var age = ageMs >= 0 ? " · " + Age(ageMs) + "前" : "";
+            return timestamp + age + " · " + name;
+        }
+
+        static long StabilityTimestampAgeMs(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return -1;
+            value = value.Trim();
+            double epochSeconds;
+            if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out epochSeconds) && epochSeconds > 0)
+            {
+                var eventMs = (long)(epochSeconds * 1000.0);
+                return Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - eventMs);
+            }
+
+            DateTimeOffset parsed;
+            if (DateTimeOffset.TryParseExact(value, "yyyy-MM-dd'T'HH-mm-ss-fff'Z'", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out parsed))
+            {
+                return (long)Math.Max(0, (DateTimeOffset.UtcNow - parsed).TotalMilliseconds);
+            }
+            return -1;
         }
 
         Tuple<bool, string, string> GetOpenClawTasksResidualProcessesReadonly()
@@ -1549,14 +1613,14 @@ namespace OpenClawLocalMonitor
                 lastOpenClawServiceActive = result.Ok ? !shouldStop : GatewayServiceLooksActive();
                 startupNote = result.Ok
                     ? (shouldStop ? "OpenClaw 已关闭。" : "OpenClaw 已启动，正在检查 Telegram。")
-                    : (shouldStop ? "已尝试关闭 OpenClaw；如果仍显示运行，请稍后重新检测。" : "已尝试启动 OpenClaw；如果仍异常，请查看状态卡片。");
+                    : (shouldStop ? "已尝试关闭 OpenClaw；如果仍显示运行，请稍后查看状态卡片或打开诊断。" : "已尝试启动 OpenClaw；如果仍异常，请查看状态卡片。");
             }
             finally
             {
                 togglingOpenClaw = false;
                 UpdateOpenClawPowerUi();
             }
-            await RefreshAsync(false);
+            await RefreshAsync();
         }
 
         void UpdateOpenClawPowerUi()
@@ -1748,7 +1812,7 @@ namespace OpenClawLocalMonitor
             }
         }
 
-        Snapshot BuildSnapshot(bool manualRecovery)
+        Snapshot BuildSnapshot()
         {
             var probeTask = Task.Run(() => RunOpenClawJson(new[] { "gateway", "probe", "--json", "--timeout", "8000" }, 12000));
             var channelStatusTask = Task.Run(() => RunOpenClawJson(new[] { "channels", "status", "--json", "--timeout", "8000" }, 10000));
@@ -1797,41 +1861,11 @@ namespace OpenClawLocalMonitor
                 return snapshot;
             }
 
-            if (!manualRecovery)
-            {
-                FillSteadyLightPlaceholders(snapshot);
-                FillConversationActivity(snapshot);
-                FillTaskTableFallback(snapshot);
-                if (!string.IsNullOrWhiteSpace(startupNote) && snapshot.GatewayOk)
-                    snapshot.StatusLine = startupNote + " | " + snapshot.StatusLine;
-                return snapshot;
-            }
-
-            var statusTask = Task.Run(() => RunOpenClawJson(new[] { "status", "--json" }, 15000));
-            var tasksTask = Task.Run(() => RunOpenClawJson(new[] { "tasks", "list", "--json" }, 12000));
-            var workspaceTask = Task.Run(() => RunWorkspaceActivity());
-            Task.WaitAll(statusTask, tasksTask, workspaceTask);
-
-            var status = statusTask.Result;
-            var taskData = tasksTask.Result;
-            var workspaceActivity = workspaceTask.Result;
-
-            FillTokenUsage(snapshot, status.Item2);
-            FillTasks(snapshot, taskData.Item2);
-            FillWorkspaceActivity(snapshot, workspaceActivity);
-            snapshot.CostText = "\u5df2\u8df3\u8fc7";
-            snapshot.CostState = "warn";
-            snapshot.Logs.Add("主面板已降级：重新检测不再读取 tasks audit、TaskFlow、logs.tail 或成本扫描，避免拖慢 Telegram。");
-            snapshot.TokenFlows.Add("成本 · 已跳过本轮扫描；需要成本细节时再单独检查。");
+            FillSteadyLightPlaceholders(snapshot);
             FillConversationActivity(snapshot);
             FillTaskTableFallback(snapshot);
-
-            if ((snapshot.RunningTasks > 0 || snapshot.FlowActive > 0 || snapshot.FlowBlocked > 0 || snapshot.FlowCancelRequested > 0 || snapshot.LocalWorkItems > 0) && snapshot.State != "Problem" && snapshot.State != "Degraded")
-                snapshot.State = "Working";
-
-            snapshot.StatusLine = string.IsNullOrWhiteSpace(snapshot.StatusLine)
-                ? snapshot.GatewayText
-                : snapshot.StatusLine;
+            snapshot.CostText = "\u5df2\u8df3\u8fc7";
+            snapshot.CostState = "warn";
             if (!string.IsNullOrWhiteSpace(startupNote) && snapshot.GatewayOk)
                 snapshot.StatusLine = startupNote + " | " + snapshot.StatusLine;
             return snapshot;
@@ -1864,7 +1898,7 @@ namespace OpenClawLocalMonitor
             snapshot.Tasks.Add(new[] { "\u63a7\u5236\u4e2d\u5fc3\u81ea\u52a8\u5237\u65b0", "\u8f7b\u91cf\u63a2\u6d4b", "\u5df2\u964d\u7ea7", "-", "\u81ea\u52a8\u5237\u65b0\u53ea\u8bfb\u53d6 gateway probe \u548c Telegram channel\uff0c\u907f\u514d\u62a2\u5360 Telegram \u5165\u53e3" });
             snapshot.Sessions.Add("\u81ea\u52a8\u5237\u65b0\u5df2\u964d\u7ea7\uff1a\u4e0d\u8bfb\u53d6 24h sessions / high-token \u5217\u8868\u3002\u9700\u8981\u65f6\u70b9\u201c\u8bca\u65ad\u201d\u3002");
             snapshot.Logs.Add("\u81ea\u52a8\u5237\u65b0\u5df2\u964d\u7ea7\uff1a\u4e0d\u8bfb\u53d6 logs.tail / tasks audit / TaskFlow / \u6210\u672c\u626b\u63cf\u3002");
-            snapshot.TokenFlows.Add("\u81ea\u52a8\u5237\u65b0\u4e0d\u8bfb\u53d6 Token/\u6210\u672c\u5feb\u7167\uff0c\u907f\u514d\u89e6\u53d1\u91cd RPC\u3002\u9700\u8981\u7ec6\u8282\u65f6\u70b9\u201c\u91cd\u65b0\u68c0\u6d4b\u201d\u6216\u201c\u8bca\u65ad\u201d\u3002");
+            snapshot.TokenFlows.Add("\u81ea\u52a8\u5237\u65b0\u4e0d\u8bfb\u53d6 Token/\u6210\u672c\u5feb\u7167\uff0c\u907f\u514d\u89e6\u53d1\u91cd RPC\u3002\u9700\u8981\u7ec6\u8282\u65f6\u70b9\u201c\u8bca\u65ad\u201d\u3002");
             snapshot.CostText = "\u5df2\u8df3\u8fc7";
             snapshot.CostState = "warn";
         }
@@ -2749,9 +2783,15 @@ namespace OpenClawLocalMonitor
             SetCard(tokenCache, s.TokenCacheRead > 0 ? "good" : "warn");
             tokenCost.Value.Text = s.CostText;
             SetCard(tokenCost, s.CostState);
+            if (tokenHeader != null) tokenHeader.Visible = false;
+            foreach (var card in new[] { tokenTotal, tokenInput, tokenOutput, tokenCache, tokenCost })
+                card.Panel.Visible = false;
+            if (costHintPopup != null) costHintPopup.Visible = false;
 
             taskGrid.Rows.Clear();
             foreach (var row in s.Tasks) taskGrid.Rows.Add(row);
+            taskGrid.Visible = false;
+            if (taskHeader != null) taskHeader.Visible = false;
 
             sessionList.Items.Clear();
             foreach (var row in s.Sessions) sessionList.Items.Add(row);

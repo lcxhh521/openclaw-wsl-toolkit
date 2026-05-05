@@ -46,15 +46,15 @@ After the gateway is running, the helper resolves the gateway token locally and 
 
 After opening the URL, the helper makes a best-effort attempt to restore and focus the browser window. This gives the user visible feedback whether the browser was minimized, hidden in the background, or not yet open.
 
-## Recheck Button
+## Main Panel Refresh
 
-The panel updates its display automatically. The `重新检测` button manually rereads WSL/OpenClaw status and rebuilds the displayed snapshot. It does not start or stop OpenClaw, edit config, reset tasks, or touch tokens.
+The panel updates its display automatically as a lightweight vital-sign view. The main screen is not a task explorer, token dashboard, or repair workflow.
 
-Hovering over the button should show this in short form inside the panel itself. The hint should stay within the app window rather than using a native tooltip that can spill outside the interface.
+Hover hints should stay within the app window rather than using native tooltips that can spill outside the interface.
 
-Automatic refresh is intentionally lightweight: it only checks gateway reachability and Telegram channel state. It does not read `sessions.list`, `logs.tail`, `tasks audit`, `tasks show`, TaskFlow, or monthly cost scans. This keeps the desktop panel from competing with Telegram for the gateway event loop.
+Automatic refresh is intentionally lightweight: it checks gateway reachability and Telegram channel state, and may show coarse background activity from the gateway probe summary. It does not expand `tasks list`, `sessions.list`, `logs.tail`, `tasks audit`, `tasks show`, TaskFlow, token snapshots, or monthly cost scans. This keeps the desktop panel from competing with Telegram for the gateway event loop.
 
-Manual `重新检测` is also read-only. It does not implicitly start gateway; use `开启 OpenClaw` for that. Manual recheck may read a small status/task/workspace snapshot, but it must not run `tasks audit/show`, `logs.tail`, maintenance apply, cleanup, cancel/delete, or config changes.
+The old manual recheck path has been removed from the main panel. Use `诊断` for architecture-level read-only troubleshooting, or `打开 Control` for the browser control surface. Starting/stopping OpenClaw remains an explicit power action.
 
 During OpenClaw cold startup, the panel uses a lightweight startup probe first: gateway probe plus Telegram channel status. It skips heavier task, audit, log, token, cost, session, and workspace-artifact reads until the startup progress reaches ready. This keeps the control center from adding pressure while OpenClaw is still bringing up channels and sidecars.
 
@@ -62,19 +62,19 @@ When restoring from the system tray or the Windows taskbar, the window should fo
 
 ## Diagnostics v0
 
-The `诊断` button opens a read-only diagnostics dialog for architecture-level troubleshooting. It is separate from `重新检测` and must not start, stop, restart, patch, apply maintenance, clean sessions, write memory, or change models/bindings/secrets.
+The `诊断` button opens a read-only diagnostics dialog for architecture-level troubleshooting. It must not start, stop, restart, patch, apply maintenance, clean sessions, write memory, or change models/bindings/secrets.
 
 Diagnostics v0 shows five sections:
 
 - Gateway: reachability, runtime/admin capability, PID/resource snapshot, stability notes.
-- Gateway Resilience: current gateway PID/start time/CPU/RSS, recent stability files, and `openclaw-tasks` residual process detection through `ps` only.
+- Gateway Resilience: current gateway PID/start time/CPU/RSS, a restart timeline from recent stability files, and `openclaw-tasks` residual process detection through `ps` only.
 - Telegram: channel status, `telegram:default` binding, current Telegram session key, token threshold state.
 - Sessions: 24h active sessions, main/telegram distribution, high-token sessions, legacy main Telegram session hints.
 - Tasks & Logs: running/queued task pressure from `tasks list --json` only. Audit/log keyword scanning is disabled in v0 because `tasks audit/show` and `logs.tail` can be expensive under gateway pressure.
 
 Each diagnostics source has its own timeout. If one section fails, the dialog should show that section as `读取失败/需观察` without affecting the main control center state. The dialog's copy button exports a redacted text report. Logs and command output must be redacted before entering the UI/report; API keys, bot tokens, OAuth material, gateway tokens/passwords, and bearer tokens must appear only as `[REDACTED]`.
 
-Gateway Resilience is a safe observation path. It must not call `openclaw tasks audit`, `openclaw tasks show`, `maintenance --apply`, restart/stop/start gateway, cleanup sessions, cancel/delete tasks, patch config, or modify agent/model/binding/secrets/session state. Residual `openclaw-tasks` rows are displayed only; the monitor never kills them automatically. If task audit is needed, it should be a separate, explicitly confirmed maintenance action, not part of the control center refresh loop.
+Gateway Resilience is a safe observation path. It must not call `openclaw tasks audit`, `openclaw tasks show`, `maintenance --apply`, restart/stop/start gateway, cleanup sessions, cancel/delete tasks, patch config, or modify agent/model/binding/secrets/session state. Residual `openclaw-tasks` rows are displayed only; the monitor never kills them automatically. Stability files are treated as evidence: the monitor summarizes the latest restart/shutdown evidence in a `Restart timeline` row and keeps the recent evidence list visible. If a serious stability event belongs to a previous gateway PID and the current gateway process is running under a new PID, the event is treated as recovered-but-observable rather than an active failure. If task audit is needed, it should be a separate, explicitly confirmed maintenance action, not part of the control center refresh loop.
 
 ## Clash Safe Mode
 
