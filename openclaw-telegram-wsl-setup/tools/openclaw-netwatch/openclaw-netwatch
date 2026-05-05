@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+set -u
+
+# OpenClaw netwatch is intentionally small:
+# - detect confirmed offline -> online transitions;
+# - detect a locally unresponsive gateway while network is online;
+# - record when recovery would be needed, without restarting gateway.
+#
+# This is observe-only by design. Gateway recovery should happen through an
+# explicit user action or OpenClaw source-level reliability logic, not through
+# a WSL watchdog silently restarting the service.
+
+STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/openclaw-netwatch"
+STATE_FILE="$STATE_DIR/state"
+LOG_FILE="$STATE_DIR/watchdog.log"
+LOCK_FILE="$STATE_DIR/lock"
+
+COOLDOWN_SECONDS="${OPENCLAW_NETWATCH_COOLDOWN_SECONDS:-300}"
+OFFLINE_CONFIRM_COUNT="${OPENCLAW_NETWATCH_OFFLINE_CONFIRM_COUNT:-2}"
+GATEWAY_FAIL_CONFIRM_COUNT="${OPENCLAW_NETWATCH_GATEWAY_FAIL_CONFIRM_COUNT:-2}"
+GATEWAY_STARTUP_GRACE_SECONDS="${OPENCLAW_NETWATCH_GATEWAY_STARTUP_GRACE_SECONDS:-240}"
+TELEGRAM_PROBE_URL="${OPENCLAW_NETWATCH_TELEGRAM_PROBE_URL:-https://api.telegram.org}"
+GATEWAY_URL="${OPENCLAW_NETWATCH_GATEWAY_URL:-http://127.0.0.1:18789/}"
+
+mkdir -p "$STATE_DIR"
+exec 9>"$LOCK_FILE"
+flock -n 9 || exit 0
+
+previous="unknown"
+last_restart=0
+offline_count=0
+gateway_fail_count=0
+if [[ -r "$STATE_FILE" ]]; then
+  # shellcheck disable=SC1090
+  . "$STATE_FILE" 2>/dev/null || true
+fi
+
+now="$(date +%s)"
+
+log() {
+  printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG_FILE"
+}
+
+load_gateway_proxy_env() {
+  local env_line item
+  env_line="$(systemctl --user show openclaw-gateway.service -p Environment --value 2>/dev/null || true)"
+  for item in $env_line; do
+    case "$item" in
+      HTTP_PROXY=*|HTTPS_PROXY=*|ALL_PROXY=*|NO_PROXY=*|http_proxy=*|https_proxy=*|all_proxy=*|no_proxy=*)
+        export "$item"
+        ;;
+    esac
+  done
+
+  export NO_PROXY="${NO_PROXY:-127.0.0.1,localhost,::1}"
+  export no_proxy="${no_proxy:-127.0.0.1,localhost,::1}"
+}
+
+is_online() {
+  load_gateway_proxy_env
+  curl -sS --connect-timeout 4 --max-time 8 -o /dev/null "$TELEGRAM_PROBE_URL" >/dev/null 2>&1
+}
+
+gateway_healthy() {
+  curl -sS --connect-timeout 2 --max-time 5 -o /dev/null "$GATEWAY_URL" >/dev/null 2>&1
+}
+
+gateway_service_age_seconds() {
+  local started started_epoch
+  started="$(systemctl --user show openclaw-gateway.service -p ActiveEnterTimestamp --value 2>/dev/null || true)"
+  [[ -n "$started" && "$started" != "n/a" ]] || return 1
+  started_epoch="$(date -d "$started" +%s 2>/dev/null || true)"
+  [[ -n "$started_epoch" ]] || return 1
+  printf '%s\n' "$((now - started_epoch))"
+}
+
+within_gateway_startup_grace() {
+  local age
+  age="$(gateway_service_age_seconds 2>/dev/null || true)"
+  [[ -n "$age" ]] || return 1
+  (( age < GATEWAY_STARTUP_GRACE_SECONDS ))
+}
+
+record_recovery_needed() {
+  local reason="$1"
+  if (( now - last_restart >= COOLDOWN_SECONDS )); then
+    log "$reason; recovery recommended, observe-only mode"
+    last_restart="$now"
+    gateway_fail_count=0
+    return 0
+  fi
+
+  log "$reason; recovery recommendation skipped by cooldown"
+  return 1
+}
+
+write_state() {
+  local state="$1"
+  {
+    printf 'previous=%q\n' "$state"
+    printf 'last_restart=%q\n' "$last_restart"
+    printf 'offline_count=%q\n' "$offline_count"
+    printf 'gateway_fail_count=%q\n' "$gateway_fail_count"
+  } > "$STATE_FILE"
+}
+
+if is_online; then
+  if [[ "$previous" == "offline" ]]; then
+    record_recovery_needed "network restored after confirmed outage"
+  elif (( offline_count > 0 )); then
+    log "network probe recovered after ${offline_count} transient failure(s); no restart"
+  fi
+
+  offline_count=0
+
+  if within_gateway_startup_grace; then
+    gateway_fail_count=0
+  elif gateway_healthy; then
+    gateway_fail_count=0
+  else
+    gateway_fail_count=$((gateway_fail_count + 1))
+    if (( gateway_fail_count >= GATEWAY_FAIL_CONFIRM_COUNT )); then
+      record_recovery_needed "gateway HTTP probe failed ${gateway_fail_count} consecutive time(s) while network is online"
+    else
+      log "gateway HTTP probe failed once; waiting for confirmation"
+    fi
+  fi
+
+  write_state "online"
+else
+  offline_count=$((offline_count + 1))
+  if (( offline_count >= OFFLINE_CONFIRM_COUNT )); then
+    if [[ "$previous" != "offline" ]]; then
+      log "network unavailable after ${offline_count} consecutive probe failures; waiting for recovery"
+    fi
+    write_state "offline"
+  else
+    log "network probe failed once; waiting for confirmation"
+    write_state "$previous"
+  fi
+fi

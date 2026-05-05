@@ -70,6 +70,29 @@ OpenClaw source-level work should add:
 - Post-restart interrupted delivery detection.
 - Clear non-model failure messages for timeout, context overflow, and session lock.
 
+### P0: Network Stability / Recovery
+
+Status: local toolkit module added; Control Center diagnostics visibility added; not installed automatically.
+
+For the Windows/WSL toolkit, network stability is split in two: the Control Center is the user-visible control surface, while a small WSL user timer is the observation layer that records network/proxy/gateway state and recovery recommendations.
+
+Local module:
+
+- `tools/openclaw-netwatch/openclaw-netwatch`
+- `tools/openclaw-netwatch/openclaw-netwatch.service`
+- `tools/openclaw-netwatch/openclaw-netwatch.timer`
+- `tools/openclaw-netwatch/Install-OpenClawNetwatch.ps1`
+- `tools/openclaw-netwatch/Uninstall-OpenClawNetwatch.ps1`
+
+Boundaries:
+
+- Default installer mode is dry-run, and applied installs are observe-only.
+- Netwatch records recovery recommendations; it does not restart gateway automatically.
+- Control Center diagnostics shows install/timer/mode/state/log status, but does not install, enable, disable, or restart netwatch by itself.
+- It does not edit OpenClaw config, model, binding, secrets, sessions, or tasks.
+- It does not run `tasks audit/show`.
+- It records confirmed offline-to-online recovery or repeated local gateway HTTP failure while network is online, with startup grace and cooldown.
+
 ### P1: Session Lifecycle / Handoff
 
 Status: design settled; source behavior belongs in OpenClaw.
@@ -113,6 +136,7 @@ Codex can connect to OpenClaw through `openclaw mcp serve` using a local MCP cli
 ## Next Steps
 
 1. Continue reviewing the Telegram Reliability v1 upstream PR.
-2. If OpenClaw remains unstable, prioritize source-level Gateway Resilience instrumentation over more UI changes.
-3. Keep the local control center focused on vital signs and read-only evidence.
-4. Revisit MCP coordination only after Telegram reliability and gateway restart behavior are less fragile.
+2. Validate OpenClaw Netwatch observe-only signals in the Control Center diagnostics report.
+3. If OpenClaw remains unstable, prioritize source-level Gateway Resilience instrumentation over more UI changes.
+4. Keep the local control center focused on vital signs and read-only evidence.
+5. Revisit MCP coordination only after Telegram reliability and gateway restart behavior are less fragile.

@@ -187,6 +187,7 @@ namespace OpenClawLocalMonitor
         public readonly List<string> OverallReasons = new List<string>();
         public readonly List<DiagnosticItem> Gateway = new List<DiagnosticItem>();
         public readonly List<DiagnosticItem> GatewayResilience = new List<DiagnosticItem>();
+        public readonly List<DiagnosticItem> NetworkStability = new List<DiagnosticItem>();
         public readonly List<DiagnosticItem> Telegram = new List<DiagnosticItem>();
         public readonly List<DiagnosticItem> Sessions = new List<DiagnosticItem>();
         public readonly List<DiagnosticItem> TasksLogs = new List<DiagnosticItem>();
@@ -1004,6 +1005,7 @@ namespace OpenClawLocalMonitor
             var d = new DiagnosticsSnapshot();
             FillDiagnosticsGateway(d);
             FillDiagnosticsGatewayResilience(d);
+            FillDiagnosticsNetworkStability(d);
             FillDiagnosticsTelegram(d);
             FillDiagnosticsSessions(d);
             FillDiagnosticsTasksAndLogs(d);
@@ -1206,6 +1208,70 @@ namespace OpenClawLocalMonitor
             }
         }
 
+        void FillDiagnosticsNetworkStability(DiagnosticsSnapshot d)
+        {
+            try
+            {
+                var status = GetNetwatchStatusReadonly();
+                if (!status.Item1)
+                {
+                    d.NetworkStability.Add(new DiagnosticItem("Netwatch", "读取失败", "Warn", RedactSensitive(status.Item3), "systemd/user files"));
+                    return;
+                }
+
+                var values = ParseKeyValueLines(status.Item2);
+                var installed = GetValue(values, "installed");
+                var timerActive = GetValue(values, "timer_active");
+                var timerEnabled = GetValue(values, "timer_enabled");
+                var serviceActive = GetValue(values, "service_active");
+                var mode = GetValue(values, "mode");
+                var previous = GetValue(values, "previous");
+                var offlineCount = GetValue(values, "offline_count");
+                var gatewayFailCount = GetValue(values, "gateway_fail_count");
+                var lastRestart = GetValue(values, "last_restart");
+                var lastLog = GetValue(values, "last_log");
+
+                var isInstalled = installed == "yes";
+                d.NetworkStability.Add(new DiagnosticItem("Netwatch installed", isInstalled ? "yes" : "no", isInstalled ? "Good" : "Warn", isInstalled ? "控制中心可见；后台执行层已安装" : "尚未安装网络稳定性 watchdog；可通过 openclaw-netwatch 安装", "systemd/user files"));
+
+                if (!isInstalled) return;
+
+                var active = timerActive == "active";
+                d.NetworkStability.Add(new DiagnosticItem("Netwatch timer", timerActive + " / " + timerEnabled, active ? "Good" : "Warn", active ? "systemd user timer 正在运行" : "timer 未 active；不会持续观察网络恢复", "systemctl --user"));
+
+                var modeState = mode == "recover" ? "Warn" : "Good";
+                var modeReason = mode == "recover" ? "检测到旧 recover 配置；新版 netwatch 已收敛为 observe-only，不应自动重启 gateway" : "Observe-only：只记录，不重启 gateway";
+                d.NetworkStability.Add(new DiagnosticItem("Netwatch mode", string.IsNullOrWhiteSpace(mode) ? "unknown" : mode, modeState, modeReason, "~/.config/openclaw-netwatch.env"));
+
+                if (!string.IsNullOrWhiteSpace(serviceActive))
+                {
+                    d.NetworkStability.Add(new DiagnosticItem("Last service state", serviceActive, serviceActive == "failed" ? "Warn" : "Good", "oneshot service 最近状态；timer active 比单次 service active 更重要", "systemctl --user"));
+                }
+
+                var counters = "network=" + (string.IsNullOrWhiteSpace(previous) ? "unknown" : previous) + " · offline_count=" + (string.IsNullOrWhiteSpace(offlineCount) ? "0" : offlineCount) + " · gateway_fail_count=" + (string.IsNullOrWhiteSpace(gatewayFailCount) ? "0" : gatewayFailCount);
+                var counterWarn = ToLong(offlineCount) > 0 || ToLong(gatewayFailCount) > 0 || previous == "offline";
+                d.NetworkStability.Add(new DiagnosticItem("Netwatch state", counters, counterWarn ? "Warn" : "Good", "最近一次网络/gateway 观察状态", "~/.cache/openclaw-netwatch/state"));
+
+                if (!string.IsNullOrWhiteSpace(lastRestart) && lastRestart != "0")
+                {
+                    d.NetworkStability.Add(new DiagnosticItem("Last recovery note", lastRestart, "Good", "netwatch 记录的最近一次恢复建议 epoch；不会主动重启 gateway", "~/.cache/openclaw-netwatch/state"));
+                }
+
+                if (!string.IsNullOrWhiteSpace(lastLog))
+                {
+                    d.NetworkStability.Add(new DiagnosticItem("Last netwatch log", Trim(RedactSensitive(lastLog), 180), "Good", "最近 watchdog 事件", "~/.cache/openclaw-netwatch/watchdog.log"));
+                }
+                else
+                {
+                    d.NetworkStability.Add(new DiagnosticItem("Last netwatch log", "无记录", "Good", "尚无 watchdog 日志", "~/.cache/openclaw-netwatch/watchdog.log"));
+                }
+            }
+            catch (Exception ex)
+            {
+                d.NetworkStability.Add(new DiagnosticItem("Network Stability", "读取失败", "Warn", RedactSensitive(ex.Message), "diagnostics"));
+            }
+        }
+
         void FillDiagnosticsTelegram(DiagnosticsSnapshot d)
         {
             try
@@ -1366,7 +1432,7 @@ namespace OpenClawLocalMonitor
 
         void FinalizeDiagnosticsState(DiagnosticsSnapshot d)
         {
-            var all = d.Gateway.Concat(d.GatewayResilience).Concat(d.Telegram).Concat(d.Sessions).Concat(d.TasksLogs).ToList();
+            var all = d.Gateway.Concat(d.GatewayResilience).Concat(d.NetworkStability).Concat(d.Telegram).Concat(d.Sessions).Concat(d.TasksLogs).ToList();
             var risk = all.Where(i => i.State == "Risk").ToList();
             var warn = all.Where(i => i.State == "Warn").ToList();
             d.OverallState = risk.Count > 0 ? "HighRisk" : warn.Count > 0 ? "Observe" : "Normal";
@@ -1475,6 +1541,37 @@ namespace OpenClawLocalMonitor
             return Tuple.Create(result.Ok, result.Stdout, result.Stderr + result.Error);
         }
 
+        Tuple<bool, string, string> GetNetwatchStatusReadonly()
+        {
+            var script =
+                "installed=no\n" +
+                "[ -x ~/.local/bin/openclaw-netwatch ] && [ -f ~/.config/systemd/user/openclaw-netwatch.timer ] && installed=yes\n" +
+                "mode=missing\n" +
+                "if [ -r ~/.config/openclaw-netwatch.env ]; then mode=$(sed -n 's/^OPENCLAW_NETWATCH_MODE=//p' ~/.config/openclaw-netwatch.env | tail -1); fi\n" +
+                "timer_active=$(systemctl --user is-active openclaw-netwatch.timer 2>/dev/null || true)\n" +
+                "timer_enabled=$(systemctl --user is-enabled openclaw-netwatch.timer 2>/dev/null || true)\n" +
+                "service_active=$(systemctl --user is-active openclaw-netwatch.service 2>/dev/null || true)\n" +
+                "previous=\n" +
+                "offline_count=0\n" +
+                "gateway_fail_count=0\n" +
+                "last_restart=0\n" +
+                "if [ -r ~/.cache/openclaw-netwatch/state ]; then . ~/.cache/openclaw-netwatch/state 2>/dev/null || true; fi\n" +
+                "last_log=\n" +
+                "if [ -r ~/.cache/openclaw-netwatch/watchdog.log ]; then last_log=$(tail -1 ~/.cache/openclaw-netwatch/watchdog.log | tr '\\t' ' '); fi\n" +
+                "printf 'installed=%s\\n' \"$installed\"\n" +
+                "printf 'mode=%s\\n' \"$mode\"\n" +
+                "printf 'timer_active=%s\\n' \"$timer_active\"\n" +
+                "printf 'timer_enabled=%s\\n' \"$timer_enabled\"\n" +
+                "printf 'service_active=%s\\n' \"$service_active\"\n" +
+                "printf 'previous=%s\\n' \"$previous\"\n" +
+                "printf 'offline_count=%s\\n' \"$offline_count\"\n" +
+                "printf 'gateway_fail_count=%s\\n' \"$gateway_fail_count\"\n" +
+                "printf 'last_restart=%s\\n' \"$last_restart\"\n" +
+                "printf 'last_log=%s\\n' \"$last_log\"";
+            var result = RunProcess("wsl.exe", new[] { "-d", WslDistro, "--", "bash", "-lc", script }, 5000);
+            return Tuple.Create(result.Ok, result.Stdout, result.Stderr + result.Error);
+        }
+
         Tuple<bool, object, string> GetChannelsStatusReadonly()
         {
             return RunOpenClawJson(new[] { "channels", "status", "--json", "--timeout", "8000" }, 10000);
@@ -1542,12 +1639,31 @@ namespace OpenClawLocalMonitor
             foreach (var reason in d.OverallReasons) sb.AppendLine("- " + RedactSensitive(reason));
             AppendDiagnosticsSection(sb, "Gateway", d.Gateway);
             AppendDiagnosticsSection(sb, "Gateway Resilience", d.GatewayResilience);
+            AppendDiagnosticsSection(sb, "Network Stability", d.NetworkStability);
             AppendDiagnosticsSection(sb, "Telegram", d.Telegram);
             AppendDiagnosticsSection(sb, "Sessions", d.Sessions);
             AppendDiagnosticsSection(sb, "Tasks & Logs", d.TasksLogs);
             sb.AppendLine();
             sb.AppendLine("v0 边界：只读；不自动重启、不 maintenance --apply、不清理 session、不改 binding/model/secrets、不写 memory。");
             return RedactSensitive(sb.ToString());
+        }
+
+        Dictionary<string, string> ParseKeyValueLines(string text)
+        {
+            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var line in (text ?? "").Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var idx = line.IndexOf('=');
+                if (idx <= 0) continue;
+                result[line.Substring(0, idx).Trim()] = line.Substring(idx + 1).Trim();
+            }
+            return result;
+        }
+
+        string GetValue(Dictionary<string, string> values, string key)
+        {
+            string value;
+            return values != null && values.TryGetValue(key, out value) ? value : "";
         }
 
         void AppendDiagnosticsSection(StringBuilder sb, string title, List<DiagnosticItem> items)

@@ -1,0 +1,8 @@
+[Unit]
+Description=OpenClaw network recovery watchdog
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.config/openclaw-netwatch.env
+ExecStart=%h/.local/bin/openclaw-netwatch

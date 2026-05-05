@@ -1,0 +1,11 @@
+[Unit]
+Description=Run OpenClaw network recovery watchdog
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=60
+Unit=openclaw-netwatch.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

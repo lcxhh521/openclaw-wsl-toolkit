@@ -671,8 +671,8 @@ If these appear after a long offline period and `openclaw status` still shows th
 1. Check network reachability on a short interval.
 2. Require at least two consecutive network probe failures before recording `offline`.
 3. While offline, only record `offline`; do not repeatedly restart OpenClaw.
-4. When state changes from confirmed `offline` to `online`, restart `openclaw-gateway.service` once.
-5. Use a cooldown so the gateway is not restarted in a loop.
+4. When state changes from confirmed `offline` to `online`, record a recovery recommendation instead of restarting gateway.
+5. Use a cooldown so repeated recommendations do not spam logs or encourage restart loops.
 6. While online, optionally check local gateway health with a simple HTTP request to the dashboard endpoint, but never during the gateway startup grace period. Do not use `openclaw gateway probe` inside the systemd watchdog; it can fail under a different user-service environment and create false restarts. Use `openclaw gateway probe` only as an interactive verification command outside the timer.
 
 Recommended user-level systemd design:
@@ -685,133 +685,20 @@ Recommended user-level systemd design:
 - Network probe: `curl -fsS --connect-timeout 4 --max-time 8 https://api.telegram.org`
 - Gateway health probe: `curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:18789/`
 - Confirm counts: at least 2 consecutive failures before declaring network offline or gateway unhealthy.
-- Gateway startup grace: at least 240 seconds after `openclaw-gateway.service` starts. During this grace period, skip gateway health restarts because OpenClaw may be staging bundled runtime dependencies or starting channels/sidecars.
+- Gateway startup grace: at least 240 seconds after `openclaw-gateway.service` starts. During this grace period, skip gateway health recovery recommendations because OpenClaw may be staging bundled runtime dependencies or starting channels/sidecars.
 - Preserve proxy environment when the gateway already uses one.
 - Preserve `NO_PROXY=127.0.0.1,localhost,::1`.
 - If generating the script from Windows or PowerShell, ensure the final file has Linux LF line endings. Mixed CRLF/LF line endings can make systemd report `unexpected end of file`.
 
-Minimal script shape:
+This skill bundle includes an installable implementation under:
 
-```bash
-#!/usr/bin/env bash
-set -u
-
-STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/openclaw-netwatch"
-STATE_FILE="$STATE_DIR/state"
-LOG_FILE="$STATE_DIR/watchdog.log"
-LOCK_FILE="$STATE_DIR/lock"
-COOLDOWN_SECONDS=300
-OFFLINE_CONFIRM_COUNT=2
-GATEWAY_FAIL_CONFIRM_COUNT=2
-GATEWAY_STARTUP_GRACE_SECONDS=240
-
-mkdir -p "$STATE_DIR"
-exec 9>"$LOCK_FILE"
-flock -n 9 || exit 0
-
-previous="unknown"
-last_restart=0
-offline_count=0
-gateway_fail_count=0
-if [[ -r "$STATE_FILE" ]]; then
-  # shellcheck disable=SC1090
-  . "$STATE_FILE" 2>/dev/null || true
-fi
-
-now="$(date +%s)"
-
-log() {
-  printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG_FILE"
-}
-
-is_online() {
-  HTTPS_PROXY="${HTTPS_PROXY:-http://127.0.0.1:18080}" \
-  HTTP_PROXY="${HTTP_PROXY:-http://127.0.0.1:18080}" \
-  https_proxy="${https_proxy:-http://127.0.0.1:18080}" \
-  http_proxy="${http_proxy:-http://127.0.0.1:18080}" \
-    curl -fsS --connect-timeout 4 --max-time 8 https://api.telegram.org >/dev/null 2>&1
-}
-
-gateway_healthy() {
-  curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:18789/ >/dev/null 2>&1
-}
-
-gateway_service_age_seconds() {
-  local started=""
-  started="$(systemctl --user show openclaw-gateway.service -p ActiveEnterTimestamp --value 2>/dev/null || true)"
-  [[ -n "$started" && "$started" != "n/a" ]] || return 1
-  local started_epoch=""
-  started_epoch="$(date -d "$started" +%s 2>/dev/null || true)"
-  [[ -n "$started_epoch" ]] || return 1
-  printf '%s\n' "$((now - started_epoch))"
-}
-
-within_gateway_startup_grace() {
-  local age=""
-  age="$(gateway_service_age_seconds 2>/dev/null || true)"
-  [[ -n "$age" ]] || return 1
-  (( age < GATEWAY_STARTUP_GRACE_SECONDS ))
-}
-
-restart_gateway() {
-  local reason="$1"
-  if (( now - last_restart >= COOLDOWN_SECONDS )); then
-    log "$reason; restarting openclaw-gateway.service"
-    systemctl --user restart openclaw-gateway.service
-    last_restart="$now"
-    gateway_fail_count=0
-    return 0
-  fi
-  log "$reason; restart skipped by cooldown"
-  return 1
-}
-
-write_state() {
-  local state="$1"
-  {
-    printf 'previous=%q\n' "$state"
-    printf 'last_restart=%q\n' "$last_restart"
-    printf 'offline_count=%q\n' "$offline_count"
-    printf 'gateway_fail_count=%q\n' "$gateway_fail_count"
-  } > "$STATE_FILE"
-}
-
-if is_online; then
-  if [[ "$previous" == "offline" ]]; then
-    restart_gateway "network restored after confirmed outage"
-  elif (( offline_count > 0 )); then
-    log "network probe recovered after ${offline_count} transient failure(s); no restart"
-  fi
-
-  offline_count=0
-
-  if within_gateway_startup_grace; then
-    gateway_fail_count=0
-  elif gateway_healthy; then
-    gateway_fail_count=0
-  else
-    gateway_fail_count=$((gateway_fail_count + 1))
-    if (( gateway_fail_count >= GATEWAY_FAIL_CONFIRM_COUNT )); then
-      restart_gateway "gateway HTTP probe failed ${gateway_fail_count} consecutive time(s) while network is online"
-    else
-      log "gateway HTTP probe failed once; waiting for confirmation"
-    fi
-  fi
-
-  write_state "online"
-else
-  offline_count=$((offline_count + 1))
-  if (( offline_count >= OFFLINE_CONFIRM_COUNT )); then
-    if [[ "$previous" != "offline" ]]; then
-      log "network unavailable after ${offline_count} consecutive probe failures; waiting for recovery"
-    fi
-    write_state "offline"
-  else
-    log "network probe failed once; waiting for confirmation"
-    write_state "$previous"
-  fi
-fi
+```text
+tools/openclaw-netwatch/
 ```
+
+Run the installer without `-Apply` first for a dry run. Applied installs are observe-only: the timer records network/gateway recovery recommendations, but it never restarts gateway automatically.
+
+Use the bundled implementation as the source of truth. Do not recreate an older watchdog that calls `systemctl --user restart openclaw-gateway.service` automatically.
 
 After installing the timer, verify:
 
@@ -826,21 +713,15 @@ openclaw status --json
 
 Expected result after initialization:
 
-- The first run may restart the gateway once if the previous state is unknown.
-- Subsequent online checks should not keep restarting.
+- The first run records current network/gateway state.
 - One failed network or gateway probe should log "waiting for confirmation" and should not restart the gateway.
-- During the gateway startup grace period, the watchdog should not restart gateway for HTTP probe failures. This prevents false restarts while OpenClaw installs bundled runtime deps or starts Telegram sidecars.
-- If gateway appears slow from Telegram but `openclaw gateway probe` is fast interactively, do not immediately restart; inspect watchdog logs first for false-positive restarts.
-- After gateway restart, wait 60-120 seconds before judging Telegram readiness.
+- During the gateway startup grace period, the watchdog should not record gateway HTTP recovery recommendations. This prevents false alarms while OpenClaw installs bundled runtime deps or starts Telegram sidecars.
+- If gateway appears slow from Telegram but `openclaw gateway probe` is fast interactively, inspect watchdog logs first; do not restart from the watchdog path.
 - `openclaw status` should return `gateway.reachable=true` after startup settles.
 
-If a user's outage pattern is Windows network interface up/down rather than proxy reachability, consider a Windows Task Scheduler trigger that runs this WSL restart on network reconnect:
+If a user's outage pattern is Windows network interface up/down rather than proxy reachability, prefer surfacing that state in Control Center diagnostics before adding any repair action. Do not add a Windows Task Scheduler reconnect restart by default.
 
-```powershell
-wsl -d Ubuntu -- bash -lc 'systemctl --user restart openclaw-gateway.service'
-```
-
-Prefer the WSL timer when the user wants continuous recovery without configuring Windows event triggers.
+Prefer the WSL timer when the user wants continuous observation without configuring Windows event triggers.
 
 ## Local OpenClaw Control Center
 

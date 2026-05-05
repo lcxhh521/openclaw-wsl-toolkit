@@ -64,10 +64,11 @@ When restoring from the system tray or the Windows taskbar, the window should fo
 
 The `诊断` button opens a read-only diagnostics dialog for architecture-level troubleshooting. It must not start, stop, restart, patch, apply maintenance, clean sessions, write memory, or change models/bindings/secrets.
 
-Diagnostics v0 shows five sections:
+Diagnostics v0 shows six sections:
 
 - Gateway: reachability, runtime/admin capability, PID/resource snapshot, stability notes.
 - Gateway Resilience: current gateway PID/start time/CPU/RSS, a restart timeline from recent stability files, and `openclaw-tasks` residual process detection through `ps` only.
+- Network Stability: OpenClaw Netwatch install/timer/mode/state/log visibility. The monitor displays the watchdog state from inside Control Center, but the watchdog itself runs as a WSL user timer so auto-refresh does not compete with Telegram or the gateway event loop.
 - Telegram: channel status, `telegram:default` binding, current Telegram session key, token threshold state.
 - Sessions: 24h active sessions, main/telegram distribution, high-token sessions, legacy main Telegram session hints.
 - Tasks & Logs: running/queued task pressure from `tasks list --json` only. Audit/log keyword scanning is disabled in v0 because `tasks audit/show` and `logs.tail` can be expensive under gateway pressure.
@@ -75,6 +76,8 @@ Diagnostics v0 shows five sections:
 Each diagnostics source has its own timeout. If one section fails, the dialog should show that section as `读取失败/需观察` without affecting the main control center state. The dialog's copy button exports a redacted text report. Logs and command output must be redacted before entering the UI/report; API keys, bot tokens, OAuth material, gateway tokens/passwords, and bearer tokens must appear only as `[REDACTED]`.
 
 Gateway Resilience is a safe observation path. It must not call `openclaw tasks audit`, `openclaw tasks show`, `maintenance --apply`, restart/stop/start gateway, cleanup sessions, cancel/delete tasks, patch config, or modify agent/model/binding/secrets/session state. Residual `openclaw-tasks` rows are displayed only; the monitor never kills them automatically. Stability files are treated as evidence: the monitor summarizes the latest restart/shutdown evidence in a `Restart timeline` row and keeps the recent evidence list visible. If a serious stability event belongs to a previous gateway PID and the current gateway process is running under a new PID, the event is treated as recovered-but-observable rather than an active failure. If task audit is needed, it should be a separate, explicitly confirmed maintenance action, not part of the control center refresh loop.
+
+Network Stability belongs in Control Center as visibility and explicit user control. The `openclaw-netwatch` script/timer is only the execution layer. Diagnostics reads whether it is installed, active, in observe-only mode, and what it last recorded. The main auto-refresh path does not run network watchdog logic, and diagnostics does not install, enable, disable, or restart the watchdog. Netwatch never restarts gateway automatically; it only records recovery recommendations.
 
 ## Clash Safe Mode
 
