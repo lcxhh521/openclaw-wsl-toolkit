@@ -52,7 +52,7 @@ The panel updates its display automatically as a lightweight vital-sign view. Th
 
 Hover hints should stay within the app window rather than using native tooltips that can spill outside the interface.
 
-Automatic refresh is intentionally lightweight: it checks gateway reachability and Telegram channel state, and may show coarse background activity from the gateway probe summary. It does not expand `tasks list`, `sessions.list`, `logs.tail`, `tasks audit`, `tasks show`, TaskFlow, token snapshots, or monthly cost scans. This keeps the desktop panel from competing with Telegram for the gateway event loop.
+The main panel intentionally does not run periodic gateway RPC refresh. It refreshes when the window opens and after explicit power actions; deeper troubleshooting belongs behind the `诊断` button. This avoids a background window, minimized taskbar entry, or tray process competing with Telegram for the gateway event loop. The main panel does not expand `tasks list`, `sessions.list`, `logs.tail`, `tasks audit`, `tasks show`, TaskFlow, token snapshots, or monthly cost scans.
 
 The old manual recheck path has been removed from the main panel. Use `诊断` for architecture-level read-only troubleshooting, or `打开 Control` for the browser control surface. Starting/stopping OpenClaw remains an explicit power action.
 

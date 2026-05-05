@@ -224,6 +224,8 @@ namespace OpenClawLocalMonitor
     {
         const string WslDistro = "Ubuntu";
         const string OpenClawCommand = "openclaw";
+        static readonly bool MainPanelAutoRefreshEnabled = false;
+        const int AutoRefreshIntervalMs = 120000;
         readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 100 };
         readonly Timer timer = new Timer();
         readonly Timer clashTimer = new Timer();
@@ -310,9 +312,16 @@ namespace OpenClawLocalMonitor
             Resize += (s, e) => OnMonitorResize();
             SetupTray();
             closePreference = LoadClosePreference();
-            timer.Interval = 30000;
-            timer.Tick += async (s, e) => await RefreshAsync();
-            timer.Start();
+            if (MainPanelAutoRefreshEnabled)
+            {
+                timer.Interval = AutoRefreshIntervalMs;
+                timer.Tick += async (s, e) =>
+                {
+                    if (!Visible || WindowState == FormWindowState.Minimized) return;
+                    await RefreshAsync();
+                };
+                timer.Start();
+            }
             clashTimer.Interval = 2500;
             clashTimer.Tick += async (s, e) => await EnsureClashSafeModeAsync(false);
             clashTimer.Start();
@@ -1949,10 +1958,10 @@ namespace OpenClawLocalMonitor
                 if (serviceLooksAlive && gatewayProbeFailures < 3)
                 {
                     snapshot.State = "Degraded";
-                    snapshot.GatewayText = "启动中";
+                    snapshot.GatewayText = "探测慢";
                     snapshot.GatewaySoftFailure = true;
-                    SetStartupProgress(snapshot, 35, "网关启动中", "OpenClaw 服务有响应，正在等待 gateway 稳定。");
-                    snapshot.StatusLine = "OpenClaw 服务仍有响应；面板会继续等待启动链路稳定。";
+                    SetStartupProgress(snapshot, 35, "网关探测慢", "OpenClaw 服务仍在运行，但本轮 gateway probe 未在超时内完成。");
+                    snapshot.StatusLine = "OpenClaw 服务仍有响应；这不是重启证据。点“诊断”可看当前 PID、uptime 和 stability 记录。";
                 }
                 else
                 {
@@ -1998,7 +2007,7 @@ namespace OpenClawLocalMonitor
         {
             if (snapshot.GatewayOk)
             {
-                snapshot.Tasks.Add(new[] { "\u542f\u52a8\u68c0\u67e5", "\u8f7b\u91cf\u63a2\u6d4b", "\u542f\u52a8\u4e2d", "-", "\u6682\u4e0d\u8bfb\u53d6\u91cd\u4efb\u52a1\uff0c\u7b49\u5f85 gateway / Telegram \u7a33\u5b9a" });
+                snapshot.Tasks.Add(new[] { "\u8f7b\u91cf\u68c0\u67e5", "\u8f7b\u91cf\u63a2\u6d4b", "\u9700\u89c2\u5bdf", "-", "\u6682\u4e0d\u8bfb\u53d6\u91cd\u4efb\u52a1\uff0c\u907f\u514d\u62a2\u5360 gateway / Telegram \u5165\u53e3" });
                 snapshot.Sessions.Add("\u542f\u52a8\u9636\u6bb5\u6682\u4e0d\u8bfb\u53d6\u4f1a\u8bdd\uff0c\u907f\u514d\u62d6\u6162 OpenClaw\u3002");
                 snapshot.Logs.Add("\u542f\u52a8\u9636\u6bb5\u53ea\u68c0\u67e5\u7f51\u5173\u548c Telegram\uff1b\u5c31\u7eea\u540e\u518d\u52a0\u8f7d\u65e5\u5fd7\u3001\u4efb\u52a1\u3001Token \u548c\u6210\u672c\u3002");
             }
@@ -2011,7 +2020,7 @@ namespace OpenClawLocalMonitor
 
         void FillSteadyLightPlaceholders(Snapshot snapshot)
         {
-            snapshot.Tasks.Add(new[] { "\u63a7\u5236\u4e2d\u5fc3\u81ea\u52a8\u5237\u65b0", "\u8f7b\u91cf\u63a2\u6d4b", "\u5df2\u964d\u7ea7", "-", "\u81ea\u52a8\u5237\u65b0\u53ea\u8bfb\u53d6 gateway probe \u548c Telegram channel\uff0c\u907f\u514d\u62a2\u5360 Telegram \u5165\u53e3" });
+            snapshot.Tasks.Add(new[] { "\u63a7\u5236\u4e2d\u5fc3\u81ea\u52a8\u5237\u65b0", "\u8f7b\u91cf\u63a2\u6d4b", "\u5df2\u5173\u95ed", "-", "\u4e3b\u9762\u677f\u4e0d\u505a\u5b9a\u65f6 gateway RPC\uff1b\u542f\u52a8\u6216\u660e\u786e\u64cd\u4f5c\u540e\u5237\u65b0\uff0c\u9700\u8981\u6df1\u67e5\u65f6\u70b9\u201c\u8bca\u65ad\u201d" });
             snapshot.Sessions.Add("\u81ea\u52a8\u5237\u65b0\u5df2\u964d\u7ea7\uff1a\u4e0d\u8bfb\u53d6 24h sessions / high-token \u5217\u8868\u3002\u9700\u8981\u65f6\u70b9\u201c\u8bca\u65ad\u201d\u3002");
             snapshot.Logs.Add("\u81ea\u52a8\u5237\u65b0\u5df2\u964d\u7ea7\uff1a\u4e0d\u8bfb\u53d6 logs.tail / tasks audit / TaskFlow / \u6210\u672c\u626b\u63cf\u3002");
             snapshot.TokenFlows.Add("\u81ea\u52a8\u5237\u65b0\u4e0d\u8bfb\u53d6 Token/\u6210\u672c\u5feb\u7167\uff0c\u907f\u514d\u89e6\u53d1\u91cd RPC\u3002\u9700\u8981\u7ec6\u8282\u65f6\u70b9\u201c\u8bca\u65ad\u201d\u3002");
@@ -2922,7 +2931,7 @@ namespace OpenClawLocalMonitor
         string HeroTitle(Snapshot s)
         {
             if (s.State == "Problem") return "需要处理";
-            if (s.State == "Degraded") return "OpenClaw 启动中";
+            if (s.State == "Degraded") return "OpenClaw 需观察";
             if (s.State == "Working") return "OpenClaw 正在工作";
             if (s.State == "Ready") return "OpenClaw 已就绪";
             return "OpenClaw 当前安静";
@@ -2937,7 +2946,7 @@ namespace OpenClawLocalMonitor
                 if (s.AuditErrors > 0) return "任务审计有错误。请查看提醒和日志。";
                 return "有项目需要处理。";
             }
-            if (s.State == "Degraded") return "OpenClaw 服务仍有响应，正在等待 gateway 和 Telegram 启动链路稳定。";
+            if (s.State == "Degraded") return "OpenClaw 服务仍有响应，但本轮轻量探测没有完全收敛；这不等于 gateway 已重启。";
             if (s.State == "Working") return "检测到 OpenClaw 注册任务、活跃 TaskFlow、仍在运行的本地 daemon，或连续刷新之间的新产物写入。可以在下方表格看进展。";
             if (s.State == "Ready") return "网关和 Telegram 已连接；后台没有 queued/running 任务、活跃 TaskFlow 或仍在运行的本地 daemon。";
             return "后台没有 queued/running 任务、活跃 TaskFlow 或仍在运行的本地 daemon。";
