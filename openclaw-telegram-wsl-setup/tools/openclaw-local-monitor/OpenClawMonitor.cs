@@ -165,6 +165,9 @@ namespace OpenClawLocalMonitor
         public string TokenContext = "-";
         public string CostText = "-";
         public string CostState = "warn";
+        public bool UsageCacheVisible;
+        public bool UsageCacheStale;
+        public string UsageCacheAge = "-";
         public long LastSessionAgeMs = -1;
         public string LastSessionSource = "-";
         public string LastSessionModel = "-";
@@ -188,6 +191,7 @@ namespace OpenClawLocalMonitor
         public readonly List<DiagnosticItem> Gateway = new List<DiagnosticItem>();
         public readonly List<DiagnosticItem> GatewayResilience = new List<DiagnosticItem>();
         public readonly List<DiagnosticItem> NetworkStability = new List<DiagnosticItem>();
+        public readonly List<DiagnosticItem> EntrancePressure = new List<DiagnosticItem>();
         public readonly List<DiagnosticItem> Telegram = new List<DiagnosticItem>();
         public readonly List<DiagnosticItem> Sessions = new List<DiagnosticItem>();
         public readonly List<DiagnosticItem> TasksLogs = new List<DiagnosticItem>();
@@ -220,6 +224,28 @@ namespace OpenClawLocalMonitor
         public readonly List<string> Lines = new List<string>();
     }
 
+    sealed class UsageCacheSummary
+    {
+        public bool Available;
+        public bool Stale;
+        public string Status = "";
+        public string Error = "";
+        public string GeneratedAt = "";
+        public long AgeMs = -1;
+        public long InputTokens;
+        public long OutputTokens;
+        public long TotalTokens;
+        public long CacheReadTokens;
+        public long CacheWriteTokens;
+        public double EstimatedCost;
+        public bool HasEstimatedCost;
+        public string SessionKey = "";
+        public long SessionTotalTokens;
+        public long SessionContextTokens;
+        public long SessionContextLimit;
+        public readonly List<string> Lines = new List<string>();
+    }
+
     sealed class MonitorForm : Form
     {
         const string WslDistro = "Ubuntu";
@@ -236,6 +262,7 @@ namespace OpenClawLocalMonitor
         readonly long freshTaskEventWindowMs = 2L * 60L * 1000L;
         Dictionary<string, long> previousArtifactMtimes = new Dictionary<string, long>();
         CostSummary cachedCost = new CostSummary();
+        bool tokenSectionVisible;
         bool artifactBaselineReady;
         bool refreshing;
         bool enforcingClashMode;
@@ -598,7 +625,7 @@ namespace OpenClawLocalMonitor
 
             openControlButton = new Button
             {
-                Text = "打开 Control",
+                Text = "原生 Control",
                 Location = new Point(962, 20),
                 Size = new Size(112, 36),
                 BackColor = Color.FromArgb(15, 23, 42),
@@ -607,7 +634,7 @@ namespace OpenClawLocalMonitor
             };
             openControlButton.FlatAppearance.BorderSize = 0;
             openControlButton.Click += (s, e) => OpenControl();
-            AddBoundedHoverTip(openControlButton, "打开浏览器版 Control。");
+            AddBoundedHoverTip(openControlButton, "高级入口，可能较重。");
             Controls.Add(openControlButton);
 
             diagnosticsButton = new Button
@@ -689,7 +716,7 @@ namespace OpenClawLocalMonitor
             tokenHeader = MakeLabel("Token / 成本流向", 28, 344, 260, 24, 12f, Color.FromArgb(15, 23, 42), true);
             tokenHeader.Visible = false;
             Controls.Add(tokenHeader);
-            tokenTotal = new Card("上下文占用", 28, 376, 142, 84);
+            tokenTotal = new Card("今日 Token", 28, 376, 142, 84);
             tokenInput = new Card("输入 Token", 184, 376, 142, 84);
             tokenOutput = new Card("输出 Token", 340, 376, 142, 84);
             tokenCache = new Card("缓存读取", 496, 376, 142, 84);
@@ -866,11 +893,33 @@ namespace OpenClawLocalMonitor
                 }
                 y += ((topCards.Length + topColumns - 1) / topColumns) * 104 + 8;
 
-                if (tokenHeader != null) tokenHeader.Visible = false;
-                foreach (var card in new[] { tokenTotal, tokenInput, tokenOutput, tokenCache, tokenCost })
+                if (tokenHeader != null)
                 {
-                    card.Panel.Visible = false;
-                    card.SetBounds(margin, y, 1, 1);
+                    tokenHeader.Visible = tokenSectionVisible;
+                    tokenHeader.SetBounds(margin, y, contentWidth, 24);
+                }
+                if (tokenSectionVisible)
+                {
+                    var tokenCards = new[] { tokenTotal, tokenInput, tokenOutput, tokenCache, tokenCost };
+                    var tokenColumns = contentWidth >= 1060 ? 5 : 3;
+                    var tokenCardWidth = (contentWidth - gap * (tokenColumns - 1)) / tokenColumns;
+                    var tokenY = y + 32;
+                    for (var i = 0; i < tokenCards.Length; i++)
+                    {
+                        var row = i / tokenColumns;
+                        var col = i % tokenColumns;
+                        tokenCards[i].Panel.Visible = true;
+                        tokenCards[i].SetBounds(margin + col * (tokenCardWidth + gap), tokenY + row * 96, tokenCardWidth, 84);
+                    }
+                    y = tokenY + ((tokenCards.Length + tokenColumns - 1) / tokenColumns) * 96 + 10;
+                }
+                else
+                {
+                    foreach (var card in new[] { tokenTotal, tokenInput, tokenOutput, tokenCache, tokenCost })
+                    {
+                        card.Panel.Visible = false;
+                        card.SetBounds(margin, y, 1, 1);
+                    }
                 }
 
                 if (costHintPopup != null)
@@ -1017,6 +1066,7 @@ namespace OpenClawLocalMonitor
             FillDiagnosticsNetworkStability(d);
             FillDiagnosticsTelegram(d);
             FillDiagnosticsSessions(d);
+            FillDiagnosticsEntrancePressure(d);
             FillDiagnosticsTasksAndLogs(d);
             FinalizeDiagnosticsState(d);
             return d;
@@ -1402,6 +1452,75 @@ namespace OpenClawLocalMonitor
             }
         }
 
+        void FillDiagnosticsEntrancePressure(DiagnosticsSnapshot d)
+        {
+            try
+            {
+                var logs = GetEntrancePressureLogsReadonly();
+                if (!logs.Item1)
+                {
+                    d.EntrancePressure.Add(new DiagnosticItem("Entrance pressure", "读取失败", "Warn", RedactSensitive(logs.Item3), "journalctl"));
+                    return;
+                }
+
+                var text = RedactSensitive(logs.Item2);
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    d.EntrancePressure.Add(new DiagnosticItem("Recent pressure", "未发现", "Good", "最近 30 分钟未命中入口压力关键字", "journalctl"));
+                    return;
+                }
+
+                var livenessCount = CountMatches(text, @"liveness warning|event_loop_delay|event_loop_utilization");
+                var severeLoopCount = CountMatches(text, @"event_loop_utilization,cpu|cpuCoreRatio=1|eventLoopUtilization=0\.(?:8|9)|eventLoopDelayMaxMs=(?:[5-9]\d{3}|\d{5,})");
+                var memoryCount = CountMatches(text, @"memory-core|dreaming");
+                var memoryFailureCount = CountMatches(text, @"narrative generation ended with status=timeout|dreaming cleanup scrub failed|session file locked");
+                var cleanupCount = CountMatches(text, @"agent cleanup timed out|pi-trajectory-flush");
+                var fetchCount = CountMatches(text, @"fetch timeout|sync failed|TypeError: fetch failed");
+                var telegramOkCount = CountMatches(text, @"\[telegram\] sendMessage ok|message\.processed.*channel=telegram");
+                var telegramErrorCount = CountMatches(text, @"\[telegram\].*(failed|error|timeout)|sendMessage failed");
+
+                var loopState = severeLoopCount > 0 ? "Risk" : livenessCount > 0 ? "Warn" : "Good";
+                d.EntrancePressure.Add(new DiagnosticItem(
+                    "Gateway loop",
+                    livenessCount == 0 ? "无明显压力" : livenessCount + " warnings" + (severeLoopCount > 0 ? " / " + severeLoopCount + " severe" : ""),
+                    loopState,
+                    livenessCount == 0 ? "最近未见 event-loop/liveness 告警" : "Gateway event loop 有卡顿；Telegram 可能在线但回包慢",
+                    "journalctl 30m"));
+
+                var memoryState = memoryFailureCount > 0 || cleanupCount > 1 ? "Risk" : memoryCount > 0 || cleanupCount > 0 ? "Warn" : "Good";
+                d.EntrancePressure.Add(new DiagnosticItem(
+                    "Memory / cleanup",
+                    "memory " + memoryCount + " / failure " + memoryFailureCount + " / cleanup " + cleanupCount,
+                    memoryState,
+                    memoryFailureCount > 0 ? "memory-core/dreaming 或 session lock 正在影响入口共享 gateway" : cleanupCount > 0 ? "agent cleanup 超时会短暂拖慢入口" : "未见 memory-core/cleanup 压力",
+                    "journalctl 30m"));
+
+                d.EntrancePressure.Add(new DiagnosticItem(
+                    "Provider / fetch",
+                    fetchCount == 0 ? "无近期失败" : fetchCount + " failures",
+                    fetchCount > 0 ? "Warn" : "Good",
+                    fetchCount > 0 ? "provider/network fetch timeout 会表现为 Telegram 等待或失败" : "未见 fetch timeout/sync failed",
+                    "journalctl 30m"));
+
+                d.EntrancePressure.Add(new DiagnosticItem(
+                    "Telegram delivery",
+                    telegramOkCount > 0 ? telegramOkCount + " recent ok" : "无近期发送记录",
+                    telegramErrorCount > 0 ? "Risk" : "Good",
+                    telegramErrorCount > 0 ? "存在 Telegram 发送失败/超时日志" : telegramOkCount > 0 ? "最近有 Telegram sendMessage/message.processed 成功记录" : "没有近期发送记录不等于异常，可能只是没有回复输出",
+                    "journalctl 30m"));
+
+                var lastPressure = LastMatchingLine(text, @"liveness warning|memory-core|dreaming|session file locked|cleanup timed out|fetch timeout|sync failed|\[telegram\]");
+                if (!string.IsNullOrWhiteSpace(lastPressure))
+                {
+                    d.EntrancePressure.Add(new DiagnosticItem("Latest signal", Trim(lastPressure, 220), severeLoopCount > 0 || memoryFailureCount > 0 || telegramErrorCount > 0 ? "Warn" : "Good", "最近一条入口相关信号", "journalctl 30m"));
+                }
+            }
+            catch (Exception ex)
+            {
+                d.EntrancePressure.Add(new DiagnosticItem("Entrance pressure", "读取失败", "Warn", RedactSensitive(ex.Message), "diagnostics"));
+            }
+        }
+
         void FillDiagnosticsTasksAndLogs(DiagnosticsSnapshot d)
         {
             try
@@ -1441,7 +1560,7 @@ namespace OpenClawLocalMonitor
 
         void FinalizeDiagnosticsState(DiagnosticsSnapshot d)
         {
-            var all = d.Gateway.Concat(d.GatewayResilience).Concat(d.NetworkStability).Concat(d.Telegram).Concat(d.Sessions).Concat(d.TasksLogs).ToList();
+            var all = d.Gateway.Concat(d.GatewayResilience).Concat(d.NetworkStability).Concat(d.EntrancePressure).Concat(d.Telegram).Concat(d.Sessions).Concat(d.TasksLogs).ToList();
             var risk = all.Where(i => i.State == "Risk").ToList();
             var warn = all.Where(i => i.State == "Warn").ToList();
             d.OverallState = risk.Count > 0 ? "HighRisk" : warn.Count > 0 ? "Observe" : "Normal";
@@ -1601,6 +1720,16 @@ namespace OpenClawLocalMonitor
             return RunOpenClawJson(new[] { "tasks", "list", "--json" }, 8000);
         }
 
+        Tuple<bool, string, string> GetEntrancePressureLogsReadonly()
+        {
+            var script =
+                "journalctl --user -u openclaw-gateway.service --since '30 minutes ago' --no-pager -o short-iso 2>/dev/null | " +
+                "grep -iE 'telegram|memory-core|dreaming|session file locked|cleanup timed out|agent cleanup timed out|fetch timeout|sync failed|liveness warning|event_loop|message\\.processed' | tail -120";
+            var result = RunProcess("wsl.exe", new[] { "-d", WslDistro, "--", "bash", "-lc", script }, 5000);
+            if (!result.Ok && string.IsNullOrWhiteSpace(result.Stdout)) return Tuple.Create(true, "", "");
+            return Tuple.Create(result.Ok, result.Stdout, result.Stderr + result.Error);
+        }
+
         void ShowDiagnosticsDialog(DiagnosticsSnapshot d)
         {
             var report = BuildDiagnosticsReport(d);
@@ -1649,6 +1778,7 @@ namespace OpenClawLocalMonitor
             AppendDiagnosticsSection(sb, "Gateway", d.Gateway);
             AppendDiagnosticsSection(sb, "Gateway Resilience", d.GatewayResilience);
             AppendDiagnosticsSection(sb, "Network Stability", d.NetworkStability);
+            AppendDiagnosticsSection(sb, "Entrance Pressure", d.EntrancePressure);
             AppendDiagnosticsSection(sb, "Telegram", d.Telegram);
             AppendDiagnosticsSection(sb, "Sessions", d.Sessions);
             AppendDiagnosticsSection(sb, "Tasks & Logs", d.TasksLogs);
@@ -1697,6 +1827,23 @@ namespace OpenClawLocalMonitor
             if (state == "Risk" || state == "HighRisk") return "高风险";
             if (state == "Confirm") return "需要人工确认";
             return "未知";
+        }
+
+        static int CountMatches(string text, string pattern)
+        {
+            if (string.IsNullOrEmpty(text)) return 0;
+            return Regex.Matches(text, pattern, RegexOptions.IgnoreCase).Count;
+        }
+
+        static string LastMatchingLine(string text, string pattern)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            var lines = text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+            for (var i = lines.Length - 1; i >= 0; i--)
+            {
+                if (Regex.IsMatch(lines[i], pattern, RegexOptions.IgnoreCase)) return lines[i];
+            }
+            return "";
         }
 
         string RedactSensitive(string text)
@@ -1916,6 +2063,14 @@ namespace OpenClawLocalMonitor
                     return;
                 }
 
+                var confirm = MessageBox.Show(
+                    this,
+                    "原生浏览器 Control 可能触发较重的会话/模型查询，打开后不要长时间挂着。\n\n确定现在打开吗？",
+                    "打开原生 Control",
+                    MessageBoxButtons.OKCancel,
+                    MessageBoxIcon.Warning);
+                if (confirm != DialogResult.OK) return;
+
                 statusLine.Text = "正在打开浏览器版 Control...";
                 var script = Path.Combine(Application.StartupPath, "Start-OpenClaw.ps1");
                 if (File.Exists(script))
@@ -1981,16 +2136,16 @@ namespace OpenClawLocalMonitor
             if (ShouldUseStartupLightProbe(snapshot))
             {
                 FillStartupLightPlaceholders(snapshot);
+                FillUsageCacheSnapshot(snapshot);
                 if (!string.IsNullOrWhiteSpace(startupNote) && snapshot.GatewayOk)
                     snapshot.StatusLine = startupNote + " | " + snapshot.StatusLine;
                 return snapshot;
             }
 
             FillSteadyLightPlaceholders(snapshot);
+            FillUsageCacheSnapshot(snapshot);
             FillConversationActivity(snapshot);
             FillTaskTableFallback(snapshot);
-            snapshot.CostText = "\u5df2\u8df3\u8fc7";
-            snapshot.CostState = "warn";
             if (!string.IsNullOrWhiteSpace(startupNote) && snapshot.GatewayOk)
                 snapshot.StatusLine = startupNote + " | " + snapshot.StatusLine;
             return snapshot;
@@ -2277,6 +2432,108 @@ namespace OpenClawLocalMonitor
 
             if (s.TokenFlows.Count == 0)
                 s.TokenFlows.Add("暂时没有可用的 Token 会话快照。");
+        }
+
+        void FillUsageCacheSnapshot(Snapshot s)
+        {
+            var cache = ReadUsageCacheSummary();
+            if (!cache.Available)
+            {
+                s.TokenFlows.Add(string.IsNullOrWhiteSpace(cache.Error)
+                    ? "Token/成本 · 暂无离线缓存；控制中心没有向 gateway 发起重查询。"
+                    : "Token/成本 · 缓存读取失败：" + Trim(cache.Error, 100));
+                s.CostText = "暂无缓存";
+                s.CostState = "warn";
+                return;
+            }
+
+            s.UsageCacheVisible = true;
+            s.UsageCacheStale = cache.Stale;
+            s.UsageCacheAge = cache.AgeMs >= 0 ? Age(cache.AgeMs) : "-";
+            s.TokenInput = cache.InputTokens;
+            s.TokenOutput = cache.OutputTokens;
+            s.TokenCacheRead = cache.CacheReadTokens;
+            s.TokenTotal = cache.TotalTokens > 0 ? cache.TotalTokens : cache.InputTokens + cache.OutputTokens;
+            if (cache.SessionTotalTokens > 0 && cache.SessionContextTokens > 0)
+            {
+                var percent = cache.SessionContextLimit > 0
+                    ? (int)Math.Round(cache.SessionContextTokens * 100.0 / Math.Max(1, cache.SessionContextLimit))
+                    : -1;
+                s.TokenContext = FormatTokens(cache.SessionTotalTokens) + " / " + FormatTokens(cache.SessionContextTokens) + (percent >= 0 ? " (" + percent + "%)" : "");
+            }
+            s.CostText = cache.HasEstimatedCost ? FormatUsd(cache.EstimatedCost) : "未记录";
+            s.CostState = cache.Stale ? "warn" : cache.HasEstimatedCost && cache.EstimatedCost > 0 ? "work" : "good";
+
+            s.TokenFlows.Clear();
+            s.TokenFlows.Add("缓存 · " + (cache.Stale ? "数据较旧" : "已更新") + " · " + (cache.AgeMs >= 0 ? Age(cache.AgeMs) + "前" : cache.GeneratedAt) + " · 控制中心未查询 gateway");
+            foreach (var line in cache.Lines.Take(8))
+                s.TokenFlows.Add(line);
+
+            if (cache.Stale && !string.IsNullOrWhiteSpace(s.StatusLine))
+                s.StatusLine += " | Token/成本缓存较旧";
+            else if (cache.Stale)
+                s.StatusLine = "Token/成本缓存较旧；控制中心仍保持只读缓存模式。";
+        }
+
+        UsageCacheSummary ReadUsageCacheSummary()
+        {
+            var summary = new UsageCacheSummary();
+            try
+            {
+                var script = "cat ~/.openclaw/monitor-cache/usage-summary.json 2>/dev/null";
+                var result = RunProcess("wsl.exe", new[] { "-d", WslDistro, "--", "bash", "-lc", script }, 3000);
+                if (!result.Ok || string.IsNullOrWhiteSpace(result.Stdout))
+                {
+                    summary.Error = "未找到 ~/.openclaw/monitor-cache/usage-summary.json";
+                    return summary;
+                }
+
+                var payload = AsDict(json.DeserializeObject(ExtractJsonObject(result.Stdout)));
+                summary.Status = Convert.ToString(Get(payload, "status") ?? "");
+                summary.GeneratedAt = Convert.ToString(Get(payload, "generatedAt") ?? "");
+                summary.Stale = ToBool(Get(payload, "stale"));
+                summary.AgeMs = UsageCacheAgeMs(summary.GeneratedAt);
+                if (summary.AgeMs > 15L * 60L * 1000L) summary.Stale = true;
+
+                var today = AsDict(Get(payload, "today"));
+                summary.InputTokens = Math.Max(0, ToLong(Get(today, "inputTokens")));
+                summary.OutputTokens = Math.Max(0, ToLong(Get(today, "outputTokens")));
+                summary.TotalTokens = Math.Max(0, ToLong(Get(today, "totalTokens")));
+                summary.CacheReadTokens = Math.Max(0, ToLong(Get(today, "cacheReadTokens")));
+                summary.CacheWriteTokens = Math.Max(0, ToLong(Get(today, "cacheWriteTokens")));
+                var costObj = Get(today, "estimatedCost");
+                summary.EstimatedCost = ToDouble(costObj);
+                summary.HasEstimatedCost = costObj != null && summary.EstimatedCost > 0;
+
+                var session = AsDict(Get(payload, "currentTelegramSession"));
+                summary.SessionKey = Convert.ToString(Get(session, "sessionKey") ?? "");
+                summary.SessionTotalTokens = Math.Max(0, ToLong(Get(session, "totalTokens")));
+                summary.SessionContextTokens = Math.Max(0, ToLong(Get(session, "contextTokens")));
+                summary.SessionContextLimit = Math.Max(0, ToLong(Get(session, "contextLimit")));
+
+                var buckets = AsList(Get(payload, "buckets"));
+                foreach (var item in buckets.Cast<object>().Take(6))
+                {
+                    var b = AsDict(item);
+                    var label = Convert.ToString(Get(b, "label") ?? Get(b, "key") ?? "-");
+                    summary.Lines.Add(
+                        "缓存 · " + Trim(label, 36) +
+                        " · 入 " + FormatTokens(Math.Max(0, ToLong(Get(b, "inputTokens")))) +
+                        "｜出 " + FormatTokens(Math.Max(0, ToLong(Get(b, "outputTokens")))) +
+                        "｜缓存 " + FormatTokens(Math.Max(0, ToLong(Get(b, "cacheReadTokens"))) + Math.Max(0, ToLong(Get(b, "cacheWriteTokens")))) +
+                        "｜成本 " + FormatOptionalUsd(Get(b, "estimatedCost")));
+                }
+
+                if (!string.IsNullOrWhiteSpace(summary.SessionKey))
+                    summary.Lines.Insert(0, "当前入口 · " + Trim(summary.SessionKey, 64));
+                summary.Available = summary.Status == "ok" || summary.TotalTokens > 0 || summary.SessionTotalTokens > 0;
+                return summary;
+            }
+            catch (Exception ex)
+            {
+                summary.Error = ex.Message;
+                return summary;
+            }
         }
 
         void FillCostUsage(Snapshot s)
@@ -2908,10 +3165,12 @@ namespace OpenClawLocalMonitor
             SetCard(tokenCache, s.TokenCacheRead > 0 ? "good" : "warn");
             tokenCost.Value.Text = s.CostText;
             SetCard(tokenCost, s.CostState);
-            if (tokenHeader != null) tokenHeader.Visible = false;
+            tokenSectionVisible = s.UsageCacheVisible;
+            if (tokenHeader != null) tokenHeader.Visible = tokenSectionVisible;
             foreach (var card in new[] { tokenTotal, tokenInput, tokenOutput, tokenCache, tokenCost })
-                card.Panel.Visible = false;
+                card.Panel.Visible = tokenSectionVisible;
             if (costHintPopup != null) costHintPopup.Visible = false;
+            LayoutUi();
 
             taskGrid.Rows.Clear();
             foreach (var row in s.Tasks) taskGrid.Rows.Add(row);
@@ -3004,7 +3263,7 @@ namespace OpenClawLocalMonitor
 
         void AddCostHint()
         {
-            const string text = "这是 OpenClaw 根据本月本地 usage.cost 记录汇总的估算成本，每月 1 号自然重新开始。它不等同于服务商最终账单，实际扣费以 OpenAI / Gemini / DeepSeek 等后台账单为准。";
+            const string text = "离线估算，约每 10 分钟更新。";
             var info = new InfoBadge
             {
               Location = new Point(86, 12),
@@ -3016,7 +3275,7 @@ namespace OpenClawLocalMonitor
             costHintPopup = new RoundedPanel
             {
                 Location = new Point(tokenCost.Panel.Left, tokenCost.Panel.Bottom + 8),
-                Size = new Size(530, 56),
+                Size = new Size(300, 36),
                 BackColor = Color.FromArgb(248, 250, 252),
                 BorderColor = Color.FromArgb(203, 213, 225),
                 Radius = 12,
@@ -3025,11 +3284,11 @@ namespace OpenClawLocalMonitor
             var hintText = new Label
             {
                 Text = text,
-                Location = new Point(14, 9),
-                Size = new Size(502, 38),
-                AutoEllipsis = false,
+                Location = new Point(12, 8),
+                Size = new Size(276, 20),
+                AutoEllipsis = true,
                 ForeColor = Color.FromArgb(51, 65, 85),
-                Font = new Font("Microsoft YaHei UI", 9f),
+                Font = new Font("Microsoft YaHei UI", 8.5f),
                 BackColor = Color.Transparent
             };
             costHintPopup.Controls.Add(hintText);
@@ -3037,6 +3296,17 @@ namespace OpenClawLocalMonitor
 
             EventHandler show = (s, e) =>
             {
+                var measured = TextRenderer.MeasureText(text, hintText.Font);
+                var width = Math.Min(Math.Max(measured.Width + 28, 190), Math.Max(190, ClientSize.Width - 56));
+                var height = Math.Max(32, measured.Height + 16);
+                var x = Math.Max(28, Math.Min(tokenCost.Panel.Right - width, ClientSize.Width - width - 28));
+                var y = tokenCost.Panel.Top - height - 8;
+                if (y < 28)
+                    y = tokenCost.Panel.Bottom + 8;
+                if (y + height > ClientSize.Height - 28)
+                    y = Math.Max(28, ClientSize.Height - height - 28);
+                costHintPopup.SetBounds(x, y, width, height);
+                hintText.SetBounds(12, Math.Max(6, (height - measured.Height) / 2), width - 24, measured.Height + 2);
                 costHintPopup.Visible = true;
                 costHintPopup.BringToFront();
             };
@@ -3160,6 +3430,21 @@ namespace OpenClawLocalMonitor
             if (value <= 0) return "$0.00";
             if (value < 0.01) return "$" + value.ToString("0.0000");
             return "$" + value.ToString("0.00");
+        }
+
+        static string FormatOptionalUsd(object value)
+        {
+            if (value == null) return "-";
+            var parsed = ToDouble(value);
+            return parsed > 0 ? FormatUsd(parsed) : "-";
+        }
+
+        static long UsageCacheAgeMs(string generatedAt)
+        {
+            if (string.IsNullOrWhiteSpace(generatedAt)) return -1;
+            DateTimeOffset parsed;
+            if (!DateTimeOffset.TryParse(generatedAt, out parsed)) return -1;
+            return (long)Math.Max(0, (DateTimeOffset.Now - parsed.ToLocalTime()).TotalMilliseconds);
         }
 
         static string Trim(string text, int max)

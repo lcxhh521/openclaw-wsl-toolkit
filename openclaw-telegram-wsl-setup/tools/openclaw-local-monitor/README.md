@@ -64,11 +64,12 @@ When restoring from the system tray or the Windows taskbar, the window should fo
 
 The `诊断` button opens a read-only diagnostics dialog for architecture-level troubleshooting. It must not start, stop, restart, patch, apply maintenance, clean sessions, write memory, or change models/bindings/secrets.
 
-Diagnostics v0 shows six sections:
+Diagnostics v0 shows seven sections:
 
 - Gateway: reachability, runtime/admin capability, PID/resource snapshot, stability notes.
 - Gateway Resilience: current gateway PID/start time/CPU/RSS, a restart timeline from recent stability files, and `openclaw-tasks` residual process detection through `ps` only.
 - Network Stability: OpenClaw Netwatch install/timer/mode/state/log visibility. The monitor displays the watchdog state from inside Control Center, but the watchdog itself runs as a WSL user timer so auto-refresh does not compete with Telegram or the gateway event loop.
+- Entrance Pressure: recent gateway-journal signals that explain why Telegram can be online but slow, including event-loop warnings, `memory-core`/dreaming timeouts, session locks, cleanup timeouts, provider fetch failures, and recent Telegram delivery success/failure. This uses `journalctl` keyword filtering only; it does not call OpenClaw `logs.tail`.
 - Telegram: channel status, `telegram:default` binding, current Telegram session key, token threshold state.
 - Sessions: 24h active sessions, main/telegram distribution, high-token sessions, legacy main Telegram session hints.
 - Tasks & Logs: running/queued task pressure from `tasks list --json` only. Audit/log keyword scanning is disabled in v0 because `tasks audit/show` and `logs.tail` can be expensive under gateway pressure.
@@ -124,3 +125,22 @@ This removes only the Startup shortcut. It does not delete the monitor folder.
 - Do not store OpenClaw tokens, API keys, auth profiles, or logs in this folder.
 - Cost shown by the panel comes from local OpenClaw session usage records. Treat it as OpenClaw's recorded/estimated model cost, not as a replacement for provider billing pages.
 - The panel assumes the WSL distro is named `Ubuntu` and that `openclaw` is available on the WSL user's login-shell `PATH`; adjust `OpenClawMonitor.cs` before building if the target machine differs.
+- The `原生 Control` button is an advanced browser entry. It warns before opening because browser Control can trigger heavier session/model queries than the local panel. Do not keep browser Control open as the daily status monitor.
+
+## Usage Cache
+
+Token and cost cards on the main panel are cache-only. The panel reads:
+
+```text
+~/.openclaw/monitor-cache/usage-summary.json
+```
+
+It never calls `sessions.list`, `models.list`, `logs.tail`, `tasks audit`, or a monthly session scan to render those cards. If the cache is missing, the cards stay hidden or show stale/cache status; the panel does not query gateway to fill the gap.
+
+Install the optional WSL timer from this directory:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-UsageCache.ps1
+```
+
+The timer installs `~/.local/bin/openclaw-usage-cache` and runs it every 10 minutes. The collector scans local session files offline and writes the small JSON cache. It does not connect to the gateway, does not restart OpenClaw, does not change config, and does not touch secrets.

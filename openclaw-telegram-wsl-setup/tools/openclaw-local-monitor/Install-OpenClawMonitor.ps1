@@ -13,7 +13,9 @@ $files = @(
     "Generate-OpenClawMonitorIcon.ps1",
     "Install-Autostart.ps1",
     "Install-WslKeepalive.ps1",
+    "Install-UsageCache.ps1",
     "Uninstall-Autostart.ps1",
+    "openclaw-usage-cache.mjs",
     "Start-OpenClaw.ps1",
     "Start-OpenClaw.cmd"
 )
