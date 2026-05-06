@@ -61,6 +61,8 @@ Windows
 
 第三块是本机控制中心。它是一个 Windows 小程序，用来启动/关闭 OpenClaw、查看 gateway 和 Telegram 是否可用、观察后台任务、Token/成本流向、最近日志和本地产物心跳。它也可以待在系统托盘里，不需要每次都开浏览器。
 
+现在的控制中心默认走轻量路线：主面板只看生命体征，不再周期性展开 `sessions.list`、`models.list`、`logs.tail`、`tasks audit/show` 这类容易挤占 gateway 的重查询。Token/成本卡片来自离线缓存 `~/.openclaw/monitor-cache/usage-summary.json`，由可选 WSL timer 约每 10 分钟扫描本地 session 文件生成；浏览器版 Control 保留为 `原生 Control` 高级入口，打开前会提示，因为它可能触发较重的会话/模型查询。
+
 第四块是市场信息浸泡模块。它是一个可选 `openclaw-job-module`，现在包含两条工作流：一条是 7x24 财经快讯的每日快讯简报，一条是《人民日报》电子版/PDF 的长文本深读。前者按时间段抓取财经快讯流，去重后交给 OpenClaw 写成 Notion 简报；后者按天抓取《人民日报》全部版面、PDF 和文章页，并在 Notion 的日期页下生成版面归档和文章深读子页。这个模块不是基础安装必需项，只有用户明确要市场日报、信息浸泡、人民日报深读或 Notion 闭环时才安装。
 
 第五块是 IMA 知识库接入。它记录了如何给 OpenClaw 安装官方 `ima-skills`，用 IMA OpenAPI 读取和搜索腾讯 ima 知识库、添加网页/微信文章、上传文件、管理笔记，并通过自然语言触发这些能力。
@@ -94,8 +96,10 @@ Windows
         |   |-- Build-OpenClawMonitor.ps1
         |   |-- Generate-OpenClawMonitorIcon.ps1
         |   |-- Install-OpenClawMonitor.ps1
+        |   |-- Install-UsageCache.ps1
         |   |-- Install-Autostart.ps1
         |   |-- Uninstall-Autostart.ps1
+        |   |-- openclaw-usage-cache.mjs
         |   |-- OpenClawMonitor.ico
         |   `-- README.md
         |-- openclaw-netwatch/
@@ -162,9 +166,8 @@ openclaw-telegram-wsl-setup/tools/openclaw-local-monitor/
 - gateway 和 Telegram 是否可用。
 - Telegram 是否已连接；冷启动细节会在顶部状态框内部用临时进度条显示，而不是塞进 Telegram 卡片。
 - 后台是否存在 `queued/running` task、活跃 TaskFlow，或正在持续产出的本地 daemon / 工作区产物心跳。
-- Token / 上下文使用快照，以及主会话、Telegram、子任务的流向。
-- 从当月本地 session 日志里的 `usage.cost` 汇总已记录成本，并按模型列出成本和 token 去向；每个自然月刷新一次。这不是服务商账单替代品。
-- 最近会话和 Telegram / error 日志提醒。
+- 今日 Token / 输入 Token / 输出 Token / 缓存读取 / 已记录成本。这些卡片只读离线缓存，约每 10 分钟更新一次；金额只是本地估算，不等同服务商账单。
+- 最近会话和少量状态提醒；主面板不把日志和任务审计当作自动刷新源。
 - 系统托盘常驻能力。
 
 ### 安装控制中心
@@ -182,17 +185,27 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-OpenClawMonito
 
 然后在本机编译 `OpenClawMonitor.exe`，创建 `OpenClaw Control` 桌面、开始菜单和 Startup-folder 快捷方式，清理旧的 `OpenClaw Monitor` / `OpenClaw 启动` 等旧入口，并启动控制中心。
 
-### 打开浏览器 Control
+如需让 Token/成本卡片显示离线缓存，在同一目录安装可选 usage cache timer：
 
-控制中心里的 `打开 Control` 按钮会调用本地 `Start-OpenClaw.ps1`。这个脚本只在本机临时解析 OpenClaw 网关令牌，并生成带 `#token=...` 的浏览器 Control URL；令牌不写进仓库、不打印到聊天、不提交到日志。这样用户不需要每次手动粘贴网关 token。
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-UsageCache.ps1
+```
 
-按钮只在 gateway 已经运行时打开浏览器 Control。如果 OpenClaw 停止，面板会提示先点 `开启 OpenClaw`，而不是隐式启动。
+它会在 Ubuntu 里安装 `openclaw-usage-cache` 和 systemd user timer，约每 10 分钟写一次 `~/.openclaw/monitor-cache/usage-summary.json`。这个采集器只扫描本地 session 文件，不连接 gateway、不重启 OpenClaw、不改配置、不碰 secrets。
 
-### 重新检测
+### 原生 Control
 
-面板会自动更新显示内容。界面上的 `重新检测` 按钮不是普通刷新按钮，而是手动触发一次主动检测：唤醒 WSL、轻量尝试启动 gateway，然后重新读取当前状态。它不修改配置、不重置任务、不碰 token；自动定时刷新仍然只读状态，不会偷偷启动或关闭 OpenClaw。
+控制中心里的 `原生 Control` 按钮会调用本地 `Start-OpenClaw.ps1`。这个脚本只在本机临时解析 OpenClaw 网关令牌，并生成带 `#token=...` 的浏览器 Control URL；令牌不写进仓库、不打印到聊天、不提交到日志。这样用户不需要每次手动粘贴网关 token。
 
-OpenClaw 冷启动时，面板会先做轻量探测，先看 gateway 和 Telegram；等就绪后再加载任务、日志、Token、成本、会话和本地产物，避免控制中心反过来拖慢 OpenClaw 启动。
+这个入口只在 gateway 已经运行时打开浏览器 Control。如果 OpenClaw 停止，面板会提示先点 `开启 OpenClaw`，而不是隐式启动。浏览器 Control 可能触发比本地面板更重的 session/model 查询，所以控制中心会先确认；它适合临时高级操作，不适合长期挂着当状态面板。
+
+### 主面板刷新
+
+主面板是轻量生命体征视图，不再保留一个容易误解的“重新检测”按钮，也不做周期性重型刷新。窗口打开、显式开启/关闭 OpenClaw、托盘恢复时可以读取轻量状态；更深的排查放到 `诊断` 弹窗。
+
+`诊断` 是只读排查入口，用于看 Gateway Resilience、Network Stability、Entrance Pressure、sessions 和 task pressure。它不自动重启、不 cleanup、不 maintenance apply、不 kill 进程、不改模型/binding/config/secrets/session。
+
+OpenClaw 冷启动时，面板会先做轻量探测，先看 gateway 和 Telegram；不会为了补齐 Token、成本、会话或日志而反过来拖慢 OpenClaw 启动。
 
 ### Clash 安全模式
 

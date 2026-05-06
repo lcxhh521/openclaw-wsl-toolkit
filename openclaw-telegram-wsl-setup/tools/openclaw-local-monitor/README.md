@@ -36,15 +36,17 @@ It also creates desktop and Start Menu shortcuts for:
 
 The installer removes old separate `OpenClaw Monitor`, `OpenClaw 启动`, and other old `OpenClaw*.lnk` shortcuts in the same shortcut folders, because the control center is now the only main entry.
 
-## Open The Browser Control
+## Native Browser Control
 
-The local panel has an `打开 Control` button. Use it only when you need the original browser-based OpenClaw Control UI. The helper script `Start-OpenClaw.ps1` is kept as an internal launcher for that button, not as a separate desktop entry.
+The local panel has a `原生 Control` button. Use it only when you need the original browser-based OpenClaw Control UI. The helper script `Start-OpenClaw.ps1` is kept as an internal launcher for that button, not as a separate desktop entry.
 
 The button only opens browser Control when the gateway is already running. If OpenClaw is stopped, the panel asks the user to click `开启 OpenClaw` first instead of implicitly starting it.
 
 After the gateway is running, the helper resolves the gateway token locally and opens the browser Control URL with a temporary `#token=...` fragment when OpenClaw exposes one. The token is not committed, printed to chat, or stored as a shortcut argument.
 
 After opening the URL, the helper makes a best-effort attempt to restore and focus the browser window. This gives the user visible feedback whether the browser was minimized, hidden in the background, or not yet open.
+
+Browser Control can trigger heavier session/model queries than the local panel. The button should warn before opening, and browser Control should not be kept open as the daily status monitor.
 
 ## Main Panel Refresh
 
@@ -54,7 +56,7 @@ Hover hints should stay within the app window rather than using native tooltips 
 
 The main panel intentionally does not run periodic gateway RPC refresh. It refreshes when the window opens and after explicit power actions; deeper troubleshooting belongs behind the `诊断` button. This avoids a background window, minimized taskbar entry, or tray process competing with Telegram for the gateway event loop. The main panel does not expand `tasks list`, `sessions.list`, `logs.tail`, `tasks audit`, `tasks show`, TaskFlow, token snapshots, or monthly cost scans.
 
-The old manual recheck path has been removed from the main panel. Use `诊断` for architecture-level read-only troubleshooting, or `打开 Control` for the browser control surface. Starting/stopping OpenClaw remains an explicit power action.
+The old manual recheck path has been removed from the main panel. Use `诊断` for architecture-level read-only troubleshooting, or `原生 Control` for the browser control surface. Starting/stopping OpenClaw remains an explicit power action.
 
 During OpenClaw cold startup, the panel uses a lightweight startup probe first: gateway probe plus Telegram channel status. It skips heavier task, audit, log, token, cost, session, and workspace-artifact reads until the startup progress reaches ready. This keeps the control center from adding pressure while OpenClaw is still bringing up channels and sidecars.
 
@@ -123,7 +125,7 @@ This removes only the Startup shortcut. It does not delete the monitor folder.
 ## Notes
 
 - Do not store OpenClaw tokens, API keys, auth profiles, or logs in this folder.
-- Cost shown by the panel comes from local OpenClaw session usage records. Treat it as OpenClaw's recorded/estimated model cost, not as a replacement for provider billing pages.
+- Token/cost shown by the panel comes from the offline usage cache at `~/.openclaw/monitor-cache/usage-summary.json`. Treat it as a local estimate, not as a replacement for provider billing pages.
 - The panel assumes the WSL distro is named `Ubuntu` and that `openclaw` is available on the WSL user's login-shell `PATH`; adjust `OpenClawMonitor.cs` before building if the target machine differs.
 - The `原生 Control` button is an advanced browser entry. It warns before opening because browser Control can trigger heavier session/model queries than the local panel. Do not keep browser Control open as the daily status monitor.
 
