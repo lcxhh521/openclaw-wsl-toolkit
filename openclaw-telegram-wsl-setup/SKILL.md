@@ -944,9 +944,12 @@ Architecture to explain to the user:
 
 - The module is installed as files under the OpenClaw workspace.
 - Scheduling is handled by WSL `systemd --user` timers.
-- Each timer calls `scripts/run_market_immersion.sh`.
+- Market digest timers call `scripts/run_market_immersion.sh`.
 - The script collects source feeds, deduplicates them, marks coverage warnings when a source cannot fully page back to the requested window start, then calls OpenClaw to produce a compact information digest.
-- Notion publishing happens only after source collection and OpenClaw digest generation succeed.
+- People's Daily deep-read uses a separate daily workflow/timer: keep only `要闻` pages, generate a date parent page with issue overview and article-level deep reads, and put structure-group original-text analysis in article child pages.
+- For People's Daily article analysis, the current contract keeps two private source prompts (`article_full_analysis_v1.md` and `article_structured_groups_v1.md`) but may execute them as one dynamic combined model call. Do not require or create a separate committed combined-prompt file; the runtime wrapper only preserves task boundaries and the merged JSON contract.
+- People's Daily hard gates should stay structural: prompt id, non-empty `full_analysis`, complete/valid `structured_groups.paragraph_indices`, and renderable group fields. Do not turn writing style, paragraph count, template wording, or rhetorical-pattern preferences into script hard failures.
+- Notion publishing happens only after source collection and OpenClaw generation succeed.
 - This is not OpenClaw's own built-in scheduler. It is a reliable host timer that invokes OpenClaw as the processing layer.
 
 Default report structure:
@@ -1013,7 +1016,10 @@ systemctl --user enable --now openclaw-market-immersion-morning.timer
 systemctl --user enable --now openclaw-market-immersion-midday.timer
 systemctl --user enable --now openclaw-market-immersion-close.timer
 systemctl --user enable --now openclaw-market-immersion-night.timer
-systemctl --user enable --now openclaw-market-feed-snapshot.timer
+# Enable only if the user also opts into the People's Daily daily deep-read workflow:
+# systemctl --user enable --now openclaw-people-daily-deep-read.timer
+# Enable feed snapshot only as a temporary fallback, not by default:
+# systemctl --user enable --now openclaw-market-feed-snapshot.timer
 ```
 
 Verification:

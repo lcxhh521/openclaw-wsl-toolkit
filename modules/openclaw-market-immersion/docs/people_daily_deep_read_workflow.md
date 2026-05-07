@@ -1,72 +1,132 @@
 # People's Daily Deep-Read Workflow
 
-This workflow keeps only the public, reusable automation shape. Local deployments can provide their own analysis prompt through `people_daily_deep_read.analysis.prompt_template_path` or `prompt_template`.
+This workflow keeps only the public, reusable automation shape. Local deployments should provide their own private reading prompts under `~/.openclaw/private-prompts/people_daily/`; do not commit prompt contents, Notion IDs, generated issue output, or state files.
 
 ## Purpose
 
-Treat the People's Daily issue as a daily policy-signal reading task, not a full-newspaper archive or a generic summary. The daily output should help the reader understand the issue-level signal, the article-level reasoning, and the original evidence behind each interpretation.
+Treat the People's Daily issue as a daily policy-signal reading task, not a full-newspaper archive or a generic summary. The output should help the reader understand:
+
+- the issue-level signal for the day;
+- each retained article's article-level meaning;
+- the original evidence behind each interpretation.
 
 ## Scope
 
-- Keep pages whose page label contains `要闻`.
-- Drop non-news pages by default: supplement, lifestyle/service, culture, ordinary professional pages, and editorial metadata rows.
-- Keep the PDF links for retained news pages.
+- Keep only pages whose page label contains `要闻`.
+- Drop supplement, lifestyle/service, culture, ordinary professional pages, and editorial metadata rows.
+- Keep PDF links only for retained news pages.
 - Create article child pages only for retained news articles.
 
-If an old manifest has no page labels, the workflow falls back to `analysis.detailed_max_page_no` for compatibility.
+If an old manifest has no page labels, the workflow may fall back to `analysis.detailed_max_page_no` for compatibility, but new runs should use page labels as the authority.
 
 ## Images
 
-- Keep image metadata collected from article pages when available.
+- Keep image metadata collected from retained article pages when available.
 - Treat picture reports as articles that need image-signal reading.
 - Do not infer image content if the source did not provide image/caption data.
 
 ## Date Page Shape
 
-1. `今日总览`
-   - 3-5 paragraphs in the target deployment.
+The date page is the day's entry point. It should stay readable and should not contain the full structured original-text analysis.
+
+1. Page title: `YYYY年MM月DD日 人民日报深读`.
+2. `今日总览`
+   - Normally 3-5 connected paragraphs.
    - It should describe the issue-level signal and article/page relationships, not list every article mechanically.
-   - The public script contains a deterministic fallback overview; private deployments may replace it with a prompt-generated overview.
-2. `全日PDF`
+   - It is generated after article-level analysis, using all retained articles and their `full_analysis` outputs.
+3. `全日PDF`
    - Only retained news-page PDFs.
-3. One section per retained news page.
-4. Each article row includes title, official source link, and child-page entry.
+4. One section per retained news page.
+5. Each retained article row includes title, official source link, article-level `全文深度解读`, and the child-page entry.
+
+The date page should not contain the full `结构化原文与解析`, long original-text quotations, backend classification labels, debug headings, or generation-process notes.
 
 ## Article Child Page Shape
 
+Each retained article gets a child page. The child page carries close-reading material so the date page does not become too long.
+
 1. `基本信息`
 2. `结构化原文与解析`
-   - Original text should remain visible.
-   - Analysis should be tied to original evidence.
-3. Optional signal / policy-chain / follow-up sections when the prompt returns them.
-4. `全文深度解读`
+   - Original text remains visible, rendered from source paragraphs by `paragraph_indices`.
+   - Analysis is organized by structure groups, not necessarily one group per natural paragraph.
+   - Each group explains the meaning/function of the grouped paragraphs and remains traceable to original evidence.
 
-## Prompt Contract
+The child page does not repeat the issue overview, PDF list, or other article list.
 
-The workflow expects the OpenClaw analysis call to return JSON:
+## Article Prompt Contract
+
+Article-level analysis is conceptually two tasks but may be executed as one model call for speed.
+
+### Source prompts
+
+Keep these as separate source-of-truth prompt files in the local private prompt directory:
+
+```text
+~/.openclaw/private-prompts/people_daily/article_full_analysis_v1.md
+~/.openclaw/private-prompts/people_daily/article_structured_groups_v1.md
+```
+
+- The first prompt defines `full_analysis`: article-level deep reading from the whole-article perspective.
+- The second prompt defines `structured_groups`: structure-group analysis for the original paragraphs.
+- Content-quality requirements belong in those prompts, not in script hard gates.
+
+### Combined execution
+
+For production speed, the script can set `analysis.combined_call=true`. In that mode it dynamically reads the two source prompt files, embeds them unchanged into a thin wrapper, and asks the model to return one merged JSON object.
+
+There does **not** need to be a separate committed combined-prompt file. The wrapper only preserves task boundaries and defines the merged JSON contract.
+
+Expected merged JSON:
 
 ```json
 {
-  "paragraph_notes": [
-    {"excerpt": "short locator", "analysis": "paragraph or structure-group analysis"}
-  ],
+  "prompt_id": "people_daily_article_combined_v1_2026-05-06",
+  "full_analysis": ["article-level deep-read paragraph"],
   "signal_analysis": ["optional signal analysis"],
   "policy_chain": ["optional chain/observation item"],
   "follow_up": ["optional follow-up item"],
-  "full_analysis": ["article-level deep-read paragraphs"]
+  "structured_groups": [
+    {
+      "title": "structure-group title",
+      "paragraph_indices": [1, 2],
+      "analysis": "why these source paragraphs should be read together"
+    }
+  ]
 }
 ```
 
-Minimum requirements:
+Hard validation should stay structural only:
 
-- `paragraph_notes` should align with the source paragraphs unless the local prompt explicitly implements structure-group merging.
-- Do not output empty praise or generic filler.
-- Every judgment should be traceable to original text, page placement, source metadata, or explicitly marked follow-up hypotheses.
-- Keep local/private reading strategies out of the public repository; load them from a local prompt template.
+- `prompt_id` matches the configured required prompt id.
+- `full_analysis` contains at least one non-empty paragraph.
+- `structured_groups` covers every input paragraph exactly once.
+- `paragraph_indices` are integers and refer only to input paragraph numbers.
+- Each group has `title`, `paragraph_indices`, and `analysis`.
+
+Do not turn writing style, paragraph count, group count, template wording, or specific rhetorical patterns into hard script failures. Those are prompt/self-review and human-review concerns.
+
+### Split fallback
+
+If `combined_call=false`, the script may run the two source prompts as separate calls and then merge their payloads. This is slower but should preserve the same output shape and page rendering contract.
+
+## Issue Overview Prompt Contract
+
+The issue overview is a separate prompt from article-level analysis. It should be generated after retained articles have `full_analysis` so the overview can read the day as a whole.
+
+Expected JSON:
+
+```json
+{
+  "prompt_id": "people_daily_overview_v1_2026-05-06",
+  "overview": ["connected issue-level paragraph"]
+}
+```
+
+Validation should reject obviously broken overview output, but the 3-5 paragraph target is a writing norm, not a doctrine. The overview should avoid backend workflow explanations and Markdown/debug headings.
 
 ## Safe Production Flow for Structure Rewrites
 
-For large article batches, use a staged flow:
+For large article batches or later rewrites, use a staged flow:
 
 1. Generate temporary drafts outside the canonical output, for example `/tmp/pd_struct_1_7.md`.
 2. Use clear separators such as `===== ARTICLE <n> =====` and preserve article titles.
@@ -78,7 +138,7 @@ For large article batches, use a staged flow:
 
 ## Delivery
 
-When Telegram delivery is enabled for the workflow, the user-facing completion message should contain the Notion page link only. Local Markdown, manifest paths, HTML previews, output directories, and generated state files are internal audit artifacts; do not surface them as the completion reminder.
+When Telegram delivery is enabled for the workflow, the user-facing completion message should contain the Notion page link only. Local Markdown, manifest paths, HTML previews, output directories, cache files, and generated state files are internal audit artifacts; do not surface them as the completion reminder.
 
 ## Automation
 
@@ -96,6 +156,8 @@ systemctl --user list-timers openclaw-people-daily-deep-read.timer --all
 systemctl --user status openclaw-people-daily-deep-read.service --no-pager
 ```
 
+If generation logic changes, confirm the timer is calling the updated installed script, not only a preview document.
+
 ## Notion Rules
 
 - First publication may create the date page and article child pages.
@@ -103,7 +165,7 @@ systemctl --user status openclaw-people-daily-deep-read.service --no-pager
 - If a previous run left a partial date page, the next run repairs missing/empty article child pages instead of creating a duplicate date page.
 - A publish is marked complete only after all expected article child pages contain both `结构化原文与解析` and `全文深度解读`; otherwise the script exits non-zero so systemd can retry.
 - Small later edits should be block/section patches rather than full-page rebuilds.
-- Never publish secrets, local output, generated daily Markdown/HTML, or state files to Git.
+- Never publish secrets, local output, generated daily Markdown/HTML, cache files, or state files to Git.
 - Completion notifications should point to the Notion URL, not local files.
 
 ## Quality Gate
@@ -113,4 +175,5 @@ Before publishing or pushing workflow changes:
 - Python scripts compile with `python3 -m py_compile`.
 - `--dry-run --no-pdf` works for a known date or manifest.
 - Generated output keeps only news pages when page labels are present.
-- No generated daily issue output, state, secrets, `/tmp` drafts, or `__pycache__` files are staged.
+- Article payloads satisfy the structural combined JSON contract.
+- No generated daily issue output, state, secrets, `/tmp` drafts, analysis caches, overview caches, checkpoints, or `__pycache__` files are staged.

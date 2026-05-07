@@ -25,11 +25,30 @@
     "analysis": {
       "enabled": true,
       "mode": "openclaw",
-      "agent": "main",
+      "agent": "daily-writer",
       "thinking": "medium",
       "timeout": 300,
       "detailed_max_page_no": 4,
-      "prompt_template_path": ""
+      "prompt_template_path": "",
+      "model": "openai-codex/gpt-5.5",
+      "parallelism": 5,
+      "combined_call": true,
+      "required_prompt_id": "people_daily_article_combined_v1_2026-05-06",
+      "full_analysis": {
+        "prompt_template_path": "",
+        "required_prompt_id": "people_daily_full_analysis_v1_2026-05-06"
+      },
+      "structured_groups": {
+        "prompt_template_path": "",
+        "required_prompt_id": "people_daily_structured_groups_v1_2026-05-06"
+      },
+      "overview": {
+        "enabled": true,
+        "prompt_template_path": "",
+        "required_prompt_id": "people_daily_overview_v1_2026-05-06",
+        "allow_deterministic_fallback": false
+      },
+      "allow_deterministic_fallback": false
     },
     "notion": {
       "enabled": false,
@@ -44,12 +63,14 @@
     "enabled": true,
     "required": true,
     "summarize_smoke": true,
-    "agent": "main",
+    "agent": "daily-writer",
     "thinking": "low",
     "timeout": 300,
     "retries": 3,
     "max_item_chars": 0,
-    "max_message_chars": 60000
+    "max_message_chars": 50000,
+    "model": "openai-codex/gpt-5.5",
+    "input_mode": "full_file"
   },
   "eastmoney_feed": {
     "enabled": true,
@@ -337,5 +358,13 @@
         }
       ]
     }
+  },
+  "raw_flow_quality_check": {
+    "max_items": 0,
+    "max_message_chars": 50000,
+    "role": "review_only_gpt_decides",
+    "gpt_review_decision_enabled": true,
+    "gpt_review_agent": "daily-writer",
+    "gpt_review_model": "openai-codex/gpt-5.5"
   }
 }

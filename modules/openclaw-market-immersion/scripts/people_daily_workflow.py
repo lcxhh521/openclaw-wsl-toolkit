@@ -4,22 +4,69 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime as dt
+import hashlib
 import json
 import os
+import random
 import re
+import signal
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
 
-from people_daily_deep_read import collect_issue, layout_url_for_date
+WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(WORKSPACE_ROOT / "scripts"))
+import background_tasks  # noqa: E402
+
+from people_daily_deep_read import collect_issue, issue_date_from_layout_url, layout_url_for_date
 
 
 NOTION_VERSION = "2022-06-28"
+NOTION_RETRYABLE_HTTP = {429, 500, 502, 503, 504}
+NOTION_MAX_ATTEMPTS = 6
+
+
+def run_process_group(
+    cmd: list[str],
+    *,
+    timeout: int,
+    text: bool = True,
+    capture_output: bool = True,
+    check: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Run a command in its own process group and kill descendants on timeout."""
+    process = subprocess.Popen(
+        cmd,
+        text=text,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE if capture_output else None,
+        stderr=subprocess.PIPE if capture_output else None,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+        completed = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+        if check and completed.returncode != 0:
+            raise subprocess.CalledProcessError(completed.returncode, cmd, output=stdout, stderr=stderr)
+        return completed
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            stdout, stderr = process.communicate(timeout=10)
+        except Exception:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except Exception:
+                pass
+            stdout, stderr = process.communicate(timeout=5)
+        raise subprocess.TimeoutExpired(cmd, timeout, output=stdout, stderr=stderr) from exc
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -40,8 +87,191 @@ def load_env_file(path: Path) -> dict[str, str]:
     return env
 
 
+def write_workflow_checkpoint(output_root: Path, issue_key: str, stage: str, payload: dict[str, Any]) -> None:
+    checkpoint_dir = output_root / issue_key / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint = {
+        "stage": stage,
+        "issue": issue_key,
+        "written_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        **payload,
+    }
+    checkpoint_path = checkpoint_dir / f"{stage}.json"
+    checkpoint_path.write_text(
+        json.dumps(checkpoint, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    task_id = os.environ.get("OPENCLAW_BACKGROUND_TASK_ID")
+    if task_id:
+        try:
+            background_tasks.update_task(
+                task_id,
+                checkpoint_path=str(checkpoint_path),
+                metadata={**(background_tasks.load_task(task_id).get("metadata") or {}), "last_stage": stage},
+                event=f"checkpoint:{stage}",
+            )
+        except Exception:
+            pass
+
+
+def people_daily_dag_spec() -> dict[str, Any]:
+    return {
+        "mode": "background_dag",
+        "nodes": [
+            {"name": "collect", "parallel": False},
+            {"name": "validate", "depends_on": ["collect"]},
+            {"name": "analyze", "depends_on": ["validate"], "checkpoint": "per_article_cache"},
+            {"name": "publish", "depends_on": ["analyze"], "notion": "serial_idempotent_write_or_repair"},
+            {"name": "notify", "depends_on": ["publish"], "telegram": "final_link_or_short_failure_only"},
+        ],
+    }
+
+
+def article_cache_key(article: dict[str, Any], index: int) -> str:
+    raw = compact(article.get("id") or article.get("url") or article.get("title") or str(index))
+    return re.sub(r"[^0-9A-Za-z_-]+", "_", raw)[-80:] or f"article_{index:02d}"
+
+
+def load_cached_analysis(output_root: Path, issue_key: str, article: dict[str, Any], index: int) -> dict[str, Any] | None:
+    path = output_root / issue_key / "analysis-cache" / f"{index:02d}_{article_cache_key(article, index)}.json"
+    if not path.exists():
+        return None
+    try:
+        return load_json(path)
+    except Exception:
+        return None
+
+
+def save_cached_analysis(output_root: Path, issue_key: str, article: dict[str, Any], index: int, analysis: dict[str, Any]) -> Path:
+    cache_dir = output_root / issue_key / "analysis-cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / f"{index:02d}_{article_cache_key(article, index)}.json"
+    payload = {
+        "issue": issue_key,
+        "index": index,
+        "url": article.get("url"),
+        "title": article.get("title"),
+        "written_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "analysis": analysis,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def overview_cache_path(output_root: Path, issue_key: str) -> Path:
+    return output_root / issue_key / "overview-cache" / "issue_overview.json"
+
+
+def load_cached_overview(output_root: Path, issue_key: str) -> dict[str, Any] | None:
+    path = overview_cache_path(output_root, issue_key)
+    if not path.exists():
+        return None
+    try:
+        return load_json(path)
+    except Exception:
+        return None
+
+
+def save_cached_overview(output_root: Path, issue_key: str, overview: dict[str, Any]) -> Path:
+    path = overview_cache_path(output_root, issue_key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "issue": issue_key,
+        "written_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "overview": overview,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def analyze_articles_with_cache(
+    *,
+    output_root: Path,
+    issue_key: str,
+    articles: list[dict[str, Any]],
+    settings: dict[str, Any],
+    reuse_cache: bool = True,
+    label: str = "analyze",
+) -> dict[str, dict[str, Any]]:
+    analysis_by_url: dict[str, dict[str, Any]] = {}
+    expected_meta = analysis_prompt_metadata(settings)
+    completed = 0
+    reused = 0
+    failed: list[dict[str, Any]] = []
+    pending: list[tuple[int, dict[str, Any]]] = []
+    for idx, article in enumerate(articles, 1):
+        cached = load_cached_analysis(output_root, issue_key, article, idx) if reuse_cache else None
+        if cached and isinstance(cached.get("analysis"), dict):
+            analysis = cached["analysis"]
+            try:
+                if analysis.get("prompt_id") != expected_meta.get("prompt_id"):
+                    raise RuntimeError("prompt_id mismatch")
+                if analysis.get("prompt_sha256") != expected_meta.get("prompt_sha256"):
+                    raise RuntimeError("prompt_sha256 mismatch")
+                validate_analysis_payload(analysis, article, settings)
+                analysis_by_url[article.get("url")] = analysis
+                reused += 1
+                continue
+            except Exception:
+                pass
+        pending.append((idx, article))
+
+    def run_one(item: tuple[int, dict[str, Any]]) -> tuple[int, dict[str, Any], dict[str, Any] | None, str]:
+        idx, article = item
+        try:
+            print(f"{label} {idx}/{len(articles)} {article.get('title')}")
+            analysis = analyze_article(article, settings, issue_key.replace("-", ""))
+            save_cached_analysis(output_root, issue_key, article, idx, analysis)
+            return idx, article, analysis, ""
+        except Exception as exc:  # noqa: BLE001
+            return idx, article, None, str(exc)
+
+    parallelism = max(1, int(settings.get("parallelism") or settings.get("concurrency") or 1))
+    if pending and parallelism > 1:
+        print(f"{label} parallelism={parallelism} pending={len(pending)}")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=parallelism) as executor:
+            future_map = {executor.submit(run_one, item): item for item in pending}
+            for future in concurrent.futures.as_completed(future_map):
+                idx, article, analysis, error = future.result()
+                if analysis is not None:
+                    analysis_by_url[article.get("url")] = analysis
+                else:
+                    failed.append({"index": idx, "title": article.get("title"), "url": article.get("url"), "error": error})
+                completed = len(analysis_by_url)
+                write_workflow_checkpoint(
+                    output_root,
+                    issue_key,
+                    "analyze",
+                    {"status": "failed" if failed else "running", "completed": completed, "total": len(articles), "reused": reused, "parallelism": parallelism, "failed": failed[-5:]},
+                )
+    else:
+        for item in pending:
+            idx, article, analysis, error = run_one(item)
+            if analysis is not None:
+                analysis_by_url[article.get("url")] = analysis
+            else:
+                failed.append({"index": idx, "title": article.get("title"), "url": article.get("url"), "error": error})
+            completed = len(analysis_by_url)
+            write_workflow_checkpoint(
+                output_root,
+                issue_key,
+                "analyze",
+                {"status": "failed" if failed else "running", "completed": completed, "total": len(articles), "reused": reused, "parallelism": parallelism, "failed": failed[-5:]},
+            )
+    if failed:
+        write_workflow_checkpoint(output_root, issue_key, "analyze", {"status": "failed", "completed": completed, "total": len(articles), "reused": reused, "failed": failed})
+        raise RuntimeError(f"People's Daily analysis failed for {len(failed)} article(s)")
+    write_workflow_checkpoint(output_root, issue_key, "analyze", {"status": "done", "completed": completed, "total": len(articles), "reused": reused})
+    return analysis_by_url
+
+
 def compact(text: Any) -> str:
-    return re.sub(r"\s+", " ", str(text or "")).strip()
+    value = str(text or "")
+    # People's Daily HTML can contain zero-width/invisible format characters
+    # (for example U+200B). Notion may drop them from page titles, so title
+    # matching must normalize them away before comparing local and Notion text.
+    value = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", value)
+    return re.sub(r"\s+", " ", value).strip()
 
 
 def notion_request(
@@ -60,26 +290,58 @@ def notion_request(
     if payload is not None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    request = urllib.request.Request(url, data=data, method=method, headers=headers)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+    last_error = ""
+    for attempt in range(1, NOTION_MAX_ATTEMPTS + 1):
+        request = urllib.request.Request(url, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")[:2000]
+            last_error = f"HTTP {exc.code} {exc.reason}: {body}"
+            if exc.code not in NOTION_RETRYABLE_HTTP or attempt >= NOTION_MAX_ATTEMPTS:
+                raise RuntimeError(f"Notion API {method} {url} failed: {last_error}") from exc
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            try:
+                delay = float(retry_after) if retry_after else 0.0
+            except ValueError:
+                delay = 0.0
+            if delay <= 0:
+                delay = min(2 ** (attempt - 1), 20) + random.uniform(0.1, 0.9)
+            print(f"Notion transient error; retrying {method} in {delay:.1f}s (attempt {attempt}/{NOTION_MAX_ATTEMPTS}): {last_error[:240]}")
+            time.sleep(delay)
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_error = str(exc)
+            if attempt >= NOTION_MAX_ATTEMPTS:
+                raise RuntimeError(f"Notion API {method} {url} failed after retries: {last_error}") from exc
+            delay = min(2 ** (attempt - 1), 20) + random.uniform(0.1, 0.9)
+            print(f"Notion transport error; retrying {method} in {delay:.1f}s (attempt {attempt}/{NOTION_MAX_ATTEMPTS}): {last_error[:240]}")
+            time.sleep(delay)
+    raise RuntimeError(f"Notion API {method} {url} failed after retries: {last_error}")
 
 
-def rich_text(text: str, href: str | None = None) -> list[dict[str, Any]]:
+def rich_text(text: str, href: str | None = None, color: str | None = None) -> list[dict[str, Any]]:
     value: dict[str, Any] = {"type": "text", "text": {"content": str(text or "")[:2000]}}
+    if color:
+        value["annotations"] = {"color": color}
     if href:
         value["text"]["link"] = {"url": href}
     return [value]
 
 
-def block(block_type: str, text: str = "", href: str | None = None) -> dict[str, Any]:
+def block(block_type: str, text: str = "", href: str | None = None, color: str | None = None) -> dict[str, Any]:
     if block_type == "child_page":
-        return {"object": "block", "type": "child_page", "child_page": {"title": text[:180]}}
+        # Notion API does not accept child_page blocks via append-children.
+        # Keep this as an internal placeholder; the publisher will create a
+        # real child page at this exact stream position with POST /v1/pages.
+        return {"__child_page_title": text[:180]}
+    if block_type == "callout":
+        return {"object": "block", "type": "callout", "callout": {"rich_text": rich_text(text, href, color), "icon": {"type": "emoji", "emoji": "🧭"}}}
     if block_type == "to_do":
-        return {"object": "block", "type": "to_do", "to_do": {"rich_text": rich_text(text, href), "checked": False}}
+        return {"object": "block", "type": "to_do", "to_do": {"rich_text": rich_text(text, href, color), "checked": False}}
     if block_type.startswith("heading_"):
-        return {"object": "block", "type": block_type, block_type: {"rich_text": rich_text(text, href)}}
-    return {"object": "block", "type": block_type, block_type: {"rich_text": rich_text(text, href)}}
+        return {"object": "block", "type": block_type, block_type: {"rich_text": rich_text(text, href, color)}}
+    return {"object": "block", "type": block_type, block_type: {"rich_text": rich_text(text, href, color)}}
 
 
 def chunked(values: list[dict[str, Any]], size: int = 90) -> list[list[dict[str, Any]]]:
@@ -87,7 +349,7 @@ def chunked(values: list[dict[str, Any]], size: int = 90) -> list[list[dict[str,
 
 
 def format_issue_title(day: dt.date) -> str:
-    return day.strftime("%Y年%m月%d日")
+    return day.strftime("%Y年%m月%d日 人民日报深读")
 
 
 def issue_date_from_manifest(manifest: dict[str, Any]) -> dt.date:
@@ -100,6 +362,13 @@ def page_label_for(article: dict[str, Any]) -> str:
 
 def article_page_title(article: dict[str, Any], serial: int) -> str:
     return f"{page_label_for(article)} {serial:02d} {article.get('title') or '未命名'}"
+
+
+def author_from_meta(meta: str) -> str:
+    value = compact(meta)
+    value = re.sub(r"人民日报\s*\(.*?\)\s*-->", "", value)
+    value = re.sub(r"《人民日报》.*$", "", value).strip()
+    return compact(value)
 
 
 def is_editorial_metadata(article: dict[str, Any]) -> bool:
@@ -229,12 +498,45 @@ DEFAULT_ANALYSIS_INSTRUCTIONS = """请填写你自己的《人民日报》/政�
 
 def load_prompt_template(settings: dict[str, Any]) -> str:
     template_path = str(settings.get("prompt_template_path") or "").strip()
-    if template_path:
-        path = Path(template_path).expanduser()
-        if not path.exists():
-            raise RuntimeError(f"People's Daily analysis prompt template not found: {path}")
-        return path.read_text(encoding="utf-8")
-    return str(settings.get("prompt_template") or DEFAULT_ANALYSIS_INSTRUCTIONS)
+    if not template_path:
+        raise RuntimeError("People's Daily formal analysis requires analysis.prompt_template_path")
+    path = Path(template_path).expanduser()
+    if not path.exists():
+        raise RuntimeError(f"People's Daily analysis prompt template not found: {path}")
+    text = path.read_text(encoding="utf-8")
+    required_prompt_id = str(settings.get("required_prompt_id") or "").strip()
+    if required_prompt_id and required_prompt_id not in text:
+        raise RuntimeError(f"People's Daily prompt id mismatch: required {required_prompt_id}")
+    return text
+
+
+def prompt_metadata(settings: dict[str, Any]) -> dict[str, Any]:
+    path = Path(str(settings.get("prompt_template_path") or "")).expanduser()
+    text = path.read_text(encoding="utf-8")
+    match = re.search(r"prompt_id:\s*([^\n]+)", text)
+    prompt_id = compact(match.group(1)) if match else str(settings.get("required_prompt_id") or "")
+    return {
+        "prompt_id": prompt_id,
+        "prompt_path": str(path),
+        "prompt_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+
+
+def analysis_prompt_metadata(settings: dict[str, Any]) -> dict[str, Any]:
+    full_settings = settings.get("full_analysis") or {}
+    structured_settings = settings.get("structured_groups") or {}
+    full_path = str(full_settings.get("prompt_template_path") or "").strip()
+    structured_path = str(structured_settings.get("prompt_template_path") or "").strip()
+    if full_path and structured_path:
+        full_text = Path(full_path).expanduser().read_text(encoding="utf-8")
+        structured_text = Path(structured_path).expanduser().read_text(encoding="utf-8")
+        prompt_id = str(settings.get("required_prompt_id") or "people_daily_article_split_v1").strip()
+        return {
+            "prompt_id": prompt_id,
+            "prompt_path": f"{Path(full_path).expanduser()}|{Path(structured_path).expanduser()}",
+            "prompt_sha256": hashlib.sha256((full_text + "\n---STRUCTURED---\n" + structured_text).encode("utf-8")).hexdigest(),
+        }
+    return prompt_metadata(settings)
 
 
 def build_openclaw_prompt(article: dict[str, Any], settings: dict[str, Any] | None = None) -> str:
@@ -252,13 +554,143 @@ def build_openclaw_prompt(article: dict[str, Any], settings: dict[str, Any] | No
 """
 
 
+def build_article_prompt(article: dict[str, Any], settings: dict[str, Any], extra_context: str = "") -> str:
+    paragraphs = [compact(p) for p in article.get("paragraphs") or [] if compact(p)]
+    numbered = "\n".join(f"{i}. {p}" for i, p in enumerate(paragraphs, 1))
+    instructions = load_prompt_template(settings)
+    context = f"\n{extra_context.strip()}\n" if extra_context.strip() else ""
+    return f"""{instructions}{context}
+
+标题：{article.get("title") or ""}
+版面：{page_label_for(article)}
+官方原文：{article.get("url") or ""}
+
+原文分段：
+{numbered}
+"""
+
+
+def build_combined_article_prompt(article: dict[str, Any], settings: dict[str, Any]) -> str:
+    """Build one model call from the two source prompts.
+
+    The full-analysis and structured-groups prompt files remain the source of
+    truth. This wrapper only combines execution and defines the single merged
+    JSON contract so the two tasks do not drift into a hand-written third prompt.
+    """
+    full_settings = settings.get("full_analysis") or {}
+    structured_settings = settings.get("structured_groups") or {}
+    full_prompt = load_prompt_template(full_settings)
+    structured_prompt = load_prompt_template(structured_settings)
+    paragraphs = [compact(p) for p in article.get("paragraphs") or [] if compact(p)]
+    numbered = "\n".join(f"{i}. {p}" for i, p in enumerate(paragraphs, 1))
+    required_prompt_id = str(settings.get("required_prompt_id") or "people_daily_article_combined_v1_2026-05-06")
+    return f"""请一次性完成两个相互独立但相关的任务：
+
+任务A：生成全文深度解读 full_analysis。
+任务B：生成结构化原文与解析 structured_groups。
+
+重要原则：
+- 任务A和任务B的内容质量要求分别以下方两个源 prompt 为准；不要把两类任务混写。
+- 任务A不要写成逐段解析；任务B不要写成全文深度解读。
+- 下方两个源 prompt 中各自的 prompt_id/JSON 输出格式用于标识其原始任务边界；本次合并调用最终只输出本文末尾指定的合并 JSON。
+- 内容质量要求由两个源 prompt 自检；自动质量门只检查结构完整、段落覆盖和可追溯性。
+
+【任务A源 prompt：全文深度解读】
+{full_prompt}
+
+【任务B源 prompt：结构化原文与解析】
+{structured_prompt}
+
+最终输出必须是一个 JSON，不要输出 Markdown。JSON 结构必须是：
+{{
+  "prompt_id": "{required_prompt_id}",
+  "full_analysis": ["连贯的全文深度解读；段数服务于判断质量"],
+  "signal_analysis": ["可选：信号/语境分析"],
+  "policy_chain": ["可选：政策链路或观察点"],
+  "follow_up": ["可选：后续跟踪事项"],
+  "structured_groups": [
+    {{
+      "title": "结构组标题，要概括共同含义",
+      "paragraph_indices": [1, 2],
+      "analysis": "这一组为什么要放在一起读，它共同形成了什么含义"
+    }}
+  ]
+}}
+
+结构性硬要求：
+- prompt_id 必须原样返回 {required_prompt_id}。
+- full_analysis 至少包含一段非空全文判断。
+- structured_groups 必须覆盖全部原文段落编号，不能漏段，不能重复。
+- paragraph_indices 只能使用输入中的段落编号。
+- 每个结构组必须包含 title、paragraph_indices、analysis。
+- 所有判断必须能回到原文证据，不能编造外部事实。
+
+标题：{article.get("title") or ""}
+版面：{page_label_for(article)}
+官方原文：{article.get("url") or ""}
+
+原文分段：
+{numbered}
+"""
+
+
 def parse_openclaw_output(stdout: str) -> dict[str, Any] | None:
+    text = stdout.strip()
+    if not text:
+        return None
+    def valid(payload: Any) -> dict[str, Any] | None:
+        if isinstance(payload, dict) and (
+            isinstance(payload.get("structured_groups"), list)
+            or isinstance(payload.get("paragraph_notes"), list)
+        ):
+            return payload
+        return None
+    try:
+        payload = json.loads(text)
+        direct = valid(payload)
+        if direct:
+            return direct
+        if isinstance(payload, dict) and isinstance(payload.get("payloads"), list):
+            inner_text = "\n".join(
+                str(item.get("text") or "")
+                for item in payload.get("payloads") or []
+                if isinstance(item, dict)
+            ).strip()
+            if inner_text:
+                inner = parse_openclaw_output(inner_text)
+                if inner:
+                    return inner
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", text, flags=re.S)
+    if match:
+        try:
+            payload = json.loads(match.group(0))
+            direct = valid(payload)
+            if direct:
+                return direct
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def parse_openclaw_json(stdout: str) -> dict[str, Any] | None:
     text = stdout.strip()
     if not text:
         return None
     try:
         payload = json.loads(text)
-        if isinstance(payload, dict) and isinstance(payload.get("paragraph_notes"), list):
+        if isinstance(payload, dict):
+            if isinstance(payload.get("payloads"), list):
+                inner_text = "\n".join(
+                    str(item.get("text") or "")
+                    for item in payload.get("payloads") or []
+                    if isinstance(item, dict)
+                ).strip()
+                if inner_text:
+                    inner = parse_openclaw_json(inner_text)
+                    if inner:
+                        return inner
             return payload
     except json.JSONDecodeError:
         pass
@@ -266,11 +698,174 @@ def parse_openclaw_output(stdout: str) -> dict[str, Any] | None:
     if match:
         try:
             payload = json.loads(match.group(0))
-            if isinstance(payload, dict) and isinstance(payload.get("paragraph_notes"), list):
-                return payload
+            return payload if isinstance(payload, dict) else None
         except json.JSONDecodeError:
             return None
     return None
+
+
+def validate_analysis_payload(payload: dict[str, Any], article: dict[str, Any], settings: dict[str, Any]) -> None:
+    required_prompt_id = str(settings.get("required_prompt_id") or "").strip()
+    if required_prompt_id and payload.get("prompt_id") != required_prompt_id:
+        raise RuntimeError(f"analysis prompt_id mismatch: {payload.get('prompt_id')} != {required_prompt_id}")
+    groups = payload.get("structured_groups") or []
+    if not isinstance(groups, list) or not groups:
+        raise RuntimeError("analysis missing structured_groups")
+    paragraphs = [compact(p) for p in article.get("paragraphs") or [] if compact(p)]
+    expected = list(range(1, len(paragraphs) + 1))
+    seen: list[int] = []
+    for group in groups:
+        if not isinstance(group, dict):
+            raise RuntimeError("structured_groups contains non-object group")
+        title = compact(group.get("title"))
+        analysis = compact(group.get("analysis"))
+        indices = group.get("paragraph_indices") or []
+        if not title or not analysis or not isinstance(indices, list):
+            raise RuntimeError("structured group missing title/analysis/paragraph_indices")
+        for value in indices:
+            if not isinstance(value, int):
+                raise RuntimeError("paragraph_indices must be integers")
+            seen.append(value)
+    if sorted(seen) != expected:
+        raise RuntimeError(f"structured group paragraph coverage mismatch: got {sorted(seen)}, expected {expected}")
+    full = payload.get("full_analysis") or []
+    if not isinstance(full, list) or not [x for x in full if compact(x)]:
+        raise RuntimeError("full_analysis must contain at least one non-empty paragraph")
+    # Do not turn style preferences into hard failures. Paragraph count, group
+    # count, repeated contrast phrasing, and legacy template wording are quality
+    # review signals, not structural validity errors. The hard gate should only
+    # reject payloads that cannot be safely rendered or traced back to the source
+    # paragraphs.
+
+
+def validate_overview_payload(payload: dict[str, Any], settings: dict[str, Any]) -> None:
+    required_prompt_id = str(settings.get("required_prompt_id") or "").strip()
+    if required_prompt_id and payload.get("prompt_id") != required_prompt_id:
+        raise RuntimeError(f"overview prompt_id mismatch: {payload.get('prompt_id')} != {required_prompt_id}")
+    overview = payload.get("overview") or []
+    if not isinstance(overview, list):
+        raise RuntimeError("overview must be a list of paragraphs")
+    paras = [compact(line) for line in overview if compact(line)]
+    # 3-5 paragraphs is the normal target, not a doctrine. Keep only a broad
+    # guardrail so the automation rejects obviously broken output without forcing
+    # the model to pad or compress a naturally coherent overview.
+    if not (2 <= len(paras) <= 7):
+        raise RuntimeError("overview must contain 2-7 non-empty paragraphs")
+    banned = ["###", "版面边界", "非要闻不纳入", "本页只保留要闻版面"]
+    text = "\n".join(paras)
+    hits = [phrase for phrase in banned if phrase in text]
+    if hits:
+        raise RuntimeError("overview contains banned wording: " + "、".join(hits))
+    if any(re.match(r"^\s*(?:[-*•]|\d+[.、])\s+", para) for para in paras):
+        raise RuntimeError("overview should be connected prose, not bullet/list items")
+
+
+def validate_cached_analysis_quality(
+    *,
+    output_root: Path,
+    issue_key: str,
+    articles: list[dict[str, Any]],
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    expected_meta = analysis_prompt_metadata(settings)
+    failures: list[dict[str, Any]] = []
+    ok = 0
+    for idx, article in enumerate(articles, 1):
+        cached = load_cached_analysis(output_root, issue_key, article, idx)
+        if not cached:
+            failures.append({"index": idx, "title": article.get("title"), "error": "missing analysis cache"})
+            continue
+        analysis = cached.get("analysis") if isinstance(cached.get("analysis"), dict) else None
+        if not analysis:
+            failures.append({"index": idx, "title": article.get("title"), "error": "cache missing analysis object"})
+            continue
+        try:
+            if analysis.get("source") != "openclaw":
+                raise RuntimeError(f"analysis source is not openclaw: {analysis.get('source')}")
+            if analysis.get("prompt_id") != expected_meta.get("prompt_id"):
+                raise RuntimeError("prompt_id mismatch")
+            if analysis.get("prompt_sha256") != expected_meta.get("prompt_sha256"):
+                raise RuntimeError("prompt_sha256 mismatch")
+            validate_analysis_payload(analysis, article, settings)
+            ok += 1
+        except Exception as exc:  # noqa: BLE001
+            failures.append({"index": idx, "title": article.get("title"), "error": str(exc)})
+    result = {
+        "status": "failed" if failures else "passed",
+        "passed": ok,
+        "total": len(articles),
+        "failed": failures,
+        "prompt_id": expected_meta.get("prompt_id"),
+        "prompt_sha256": expected_meta.get("prompt_sha256"),
+    }
+    write_workflow_checkpoint(output_root, issue_key, "quality_gate", result)
+    if failures:
+        raise RuntimeError(f"People's Daily quality gate failed: {len(failures)}/{len(articles)} article(s)")
+    return result
+
+
+def validate_full_analysis_payload(payload: dict[str, Any], settings: dict[str, Any]) -> None:
+    required_prompt_id = str(settings.get("required_prompt_id") or "").strip()
+    if required_prompt_id and payload.get("prompt_id") != required_prompt_id:
+        raise RuntimeError(f"full_analysis prompt_id mismatch: {payload.get('prompt_id')} != {required_prompt_id}")
+    full = payload.get("full_analysis") or []
+    if not isinstance(full, list) or not [line for line in full if compact(line)]:
+        raise RuntimeError("full_analysis payload missing non-empty full_analysis")
+
+
+def validate_structured_groups_payload(payload: dict[str, Any], article: dict[str, Any], settings: dict[str, Any]) -> None:
+    required_prompt_id = str(settings.get("required_prompt_id") or "").strip()
+    if required_prompt_id and payload.get("prompt_id") != required_prompt_id:
+        raise RuntimeError(f"structured_groups prompt_id mismatch: {payload.get('prompt_id')} != {required_prompt_id}")
+    groups = payload.get("structured_groups") or []
+    if not isinstance(groups, list) or not groups:
+        raise RuntimeError("structured_groups payload missing structured_groups")
+    combined = {"prompt_id": "", "structured_groups": groups, "full_analysis": ["placeholder"]}
+    validate_analysis_payload(combined, article, {"required_prompt_id": ""})
+
+
+def run_openclaw_json_prompt(
+    *,
+    prompt: str,
+    openclaw_bin: Path,
+    agent: str,
+    model: str,
+    thinking: str,
+    timeout: int,
+    session_id: str,
+) -> dict[str, Any]:
+    cmd = [
+        str(openclaw_bin),
+        "agent",
+        "--local",
+        "--agent",
+        agent,
+        "--session-id",
+        session_id,
+        "--json",
+        "--thinking",
+        thinking,
+        "--timeout",
+        str(timeout),
+        "--model",
+        model,
+        "--message",
+        prompt,
+    ]
+    completed = run_process_group(
+        cmd,
+        text=True,
+        capture_output=True,
+        timeout=timeout + 30,
+        check=False,
+    )
+    payload = parse_openclaw_json(completed.stdout)
+    if payload and completed.returncode == 0:
+        return payload
+    raise RuntimeError(
+        "OpenClaw JSON prompt failed. "
+        f"returncode={completed.returncode}; stderr={completed.stderr[-1200:]}; stdout={completed.stdout[-1200:]}"
+    )
 
 
 def openclaw_article_analysis(
@@ -278,11 +873,74 @@ def openclaw_article_analysis(
     article: dict[str, Any],
     openclaw_bin: Path,
     agent: str,
+    model: str,
     thinking: str,
     timeout: int,
     session_prefix: str,
     settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    settings = settings or {}
+    split_full = settings.get("full_analysis") or {}
+    split_structured = settings.get("structured_groups") or {}
+    if settings.get("combined_call", False) and split_full.get("prompt_template_path") and split_structured.get("prompt_template_path"):
+        metadata = analysis_prompt_metadata(settings)
+        prompt = build_combined_article_prompt(article, settings)
+        payload = run_openclaw_json_prompt(
+            prompt=prompt,
+            openclaw_bin=openclaw_bin,
+            agent=agent,
+            model=model,
+            thinking=thinking,
+            timeout=timeout,
+            session_id=f"{session_prefix}-{article.get('id') or int(time.time())}-combined",
+        )
+        validate_analysis_payload(payload, article, settings)
+        payload.update(metadata)
+        payload["source"] = "openclaw"
+        payload["mode"] = "combined_from_source_prompts"
+        return payload
+    if split_full.get("prompt_template_path") and split_structured.get("prompt_template_path"):
+        metadata = analysis_prompt_metadata(settings)
+        full_prompt = build_article_prompt(article, split_full)
+        full_payload = run_openclaw_json_prompt(
+            prompt=full_prompt,
+            openclaw_bin=openclaw_bin,
+            agent=agent,
+            model=model,
+            thinking=thinking,
+            timeout=timeout,
+            session_id=f"{session_prefix}-{article.get('id') or int(time.time())}-full",
+        )
+        validate_full_analysis_payload(full_payload, split_full)
+        full_analysis = [compact(line) for line in full_payload.get("full_analysis") or [] if compact(line)]
+        structured_prompt = build_article_prompt(
+            article,
+            split_structured,
+            extra_context="全文深度解读（供结构化分组时把握全文视角，不要机械照抄）：\n" + "\n".join(full_analysis),
+        )
+        structured_payload = run_openclaw_json_prompt(
+            prompt=structured_prompt,
+            openclaw_bin=openclaw_bin,
+            agent=agent,
+            model=model,
+            thinking=thinking,
+            timeout=timeout,
+            session_id=f"{session_prefix}-{article.get('id') or int(time.time())}-structured",
+        )
+        validate_structured_groups_payload(structured_payload, article, split_structured)
+        payload = {
+            "prompt_id": metadata.get("prompt_id"),
+            "full_analysis": full_analysis,
+            "structured_groups": structured_payload.get("structured_groups") or [],
+            "signal_analysis": full_payload.get("signal_analysis") or [],
+            "policy_chain": full_payload.get("policy_chain") or [],
+            "follow_up": full_payload.get("follow_up") or [],
+            **metadata,
+            "source": "openclaw",
+            "mode": "split_full_then_structured",
+        }
+        validate_analysis_payload(payload, article, settings)
+        return payload
     prompt = build_openclaw_prompt(article, settings or {})
     session_id = f"{session_prefix}-{article.get('id') or int(time.time())}"
     cmd = [
@@ -298,9 +956,12 @@ def openclaw_article_analysis(
         thinking,
         "--timeout",
         str(timeout),
+        "--model",
+        model,
+        "--message",
         prompt,
     ]
-    completed = subprocess.run(
+    completed = run_process_group(
         cmd,
         text=True,
         capture_output=True,
@@ -308,10 +969,17 @@ def openclaw_article_analysis(
         check=False,
     )
     payload = parse_openclaw_output(completed.stdout)
-    if payload:
+    if payload and completed.returncode == 0:
+        validate_analysis_payload(payload, article, settings or {})
+        payload.update(analysis_prompt_metadata(settings or {}))
         payload["source"] = "openclaw"
         payload["returncode"] = completed.returncode
         return payload
+    if not (settings or {}).get("allow_deterministic_fallback", False):
+        raise RuntimeError(
+            "OpenClaw People's Daily analysis failed; deterministic fallback is disabled. "
+            f"returncode={completed.returncode}; stderr={completed.stderr[-1200:]}; stdout={completed.stdout[-1200:]}"
+        )
     fallback = deterministic_article_analysis(article)
     fallback["source"] = "deterministic_after_openclaw_failure"
     fallback["openclaw_returncode"] = completed.returncode
@@ -319,15 +987,113 @@ def openclaw_article_analysis(
     return fallback
 
 
+def build_overview_prompt(
+    *,
+    manifest: dict[str, Any],
+    detailed: list[dict[str, Any]],
+    analysis_by_url: dict[str, dict[str, Any]],
+    settings: dict[str, Any],
+) -> str:
+    instructions = load_prompt_template(settings)
+    issue_date = compact((manifest.get("issue") or {}).get("date"))
+    article_lines: list[str] = []
+    for idx, article in enumerate(detailed, 1):
+        analysis = analysis_by_url.get(article.get("url")) or {}
+        full = [compact(line) for line in analysis.get("full_analysis") or [] if compact(line)]
+        article_lines.append(
+            "\n".join(
+                [
+                    f"{idx}. 标题：{article.get('title') or ''}",
+                    f"版面：{page_label_for(article)}",
+                    f"官方原文：{article.get('url') or ''}",
+                    "整篇深度解读：" + (" / ".join(full) if full else "（缺失）"),
+                ]
+            )
+        )
+    return f"""{instructions}
+
+日期：{issue_date}
+
+当天要闻文章与整篇深度解读：
+{chr(10).join(article_lines)}
+"""
+
+
+def openclaw_issue_overview(
+    *,
+    manifest: dict[str, Any],
+    detailed: list[dict[str, Any]],
+    analysis_by_url: dict[str, dict[str, Any]],
+    openclaw_bin: Path,
+    agent: str,
+    model: str,
+    thinking: str,
+    timeout: int,
+    session_prefix: str,
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    prompt = build_overview_prompt(manifest=manifest, detailed=detailed, analysis_by_url=analysis_by_url, settings=settings)
+    session_id = f"{session_prefix}-overview"
+    cmd = [
+        str(openclaw_bin),
+        "agent",
+        "--local",
+        "--agent",
+        agent,
+        "--session-id",
+        session_id,
+        "--json",
+        "--thinking",
+        thinking,
+        "--timeout",
+        str(timeout),
+        "--model",
+        model,
+        "--message",
+        prompt,
+    ]
+    completed = run_process_group(
+        cmd,
+        text=True,
+        capture_output=True,
+        timeout=timeout + 30,
+        check=False,
+    )
+    payload = parse_openclaw_json(completed.stdout)
+    if payload and completed.returncode == 0:
+        validate_overview_payload(payload, settings)
+        payload.update(prompt_metadata(settings))
+        payload["source"] = "openclaw"
+        payload["returncode"] = completed.returncode
+        return payload
+    if not settings.get("allow_deterministic_fallback", False):
+        raise RuntimeError(
+            "OpenClaw People's Daily overview failed; deterministic fallback is disabled. "
+            f"returncode={completed.returncode}; stderr={completed.stderr[-1200:]}; stdout={completed.stdout[-1200:]}"
+        )
+    fallback = {
+        "overview": build_daily_overview_lines(detailed, analysis_by_url),
+        "source": "deterministic_after_openclaw_failure",
+        "openclaw_returncode": completed.returncode,
+        "openclaw_stderr": completed.stderr[-1200:],
+    }
+    return fallback
+
+
 def analyze_article(article: dict[str, Any], settings: dict[str, Any], issue_key: str) -> dict[str, Any]:
     if not settings.get("enabled", True):
+        if not settings.get("allow_deterministic_fallback", False):
+            raise RuntimeError("People's Daily analysis disabled but deterministic fallback is not allowed")
         return deterministic_article_analysis(article)
     if str(settings.get("mode") or "openclaw") != "openclaw":
+        if not settings.get("allow_deterministic_fallback", False):
+            raise RuntimeError("People's Daily analysis mode is not openclaw and deterministic fallback is not allowed")
         return deterministic_article_analysis(article)
     return openclaw_article_analysis(
         article=article,
         openclaw_bin=Path(settings.get("openclaw_bin") or "openclaw").expanduser(),
-        agent=str(settings.get("agent") or "main"),
+        agent=str(settings.get("agent") or "daily-writer"),
+        model=str(settings.get("model") or "openai-codex/gpt-5.5"),
         thinking=str(settings.get("thinking") or "medium"),
         timeout=int(settings.get("timeout") or 300),
         session_prefix=f"people-daily-{issue_key}",
@@ -347,44 +1113,44 @@ def append_text_blocks(blocks: list[dict[str, Any]], block_type: str, prefix: st
         blocks.append(block(block_type, f"{chunk_prefix}{chunk}"))
 
 
+def append_original_text_blocks(blocks: list[dict[str, Any]], text: str) -> None:
+    value = compact(text)
+    if not value:
+        return
+    max_len = 1900
+    for start in range(0, len(value), max_len):
+        blocks.append(block("paragraph", value[start : start + max_len], color="gray"))
+
+
 def build_article_page_blocks(article: dict[str, Any], analysis: dict[str, Any]) -> list[dict[str, Any]]:
     blocks = [
+        block("callout", "浅色为原文，正常色为解析；不写‘原文’标签；不机械逐自然段；按文章结构组解析。"),
         block("heading_1", "基本信息"),
         block("bulleted_list_item", f"版面：{page_label_for(article)}"),
         block("bulleted_list_item", "官方原文", str(article.get("url") or "")),
         block("bulleted_list_item", f"正文规模：约 {article.get('char_count') or 0} 字"),
         block("heading_1", "结构化原文与解析"),
     ]
-    notes = list(analysis.get("paragraph_notes") or [])
     paragraphs = [compact(p) for p in article.get("paragraphs") or [] if compact(p)]
-    for index, paragraph in enumerate(paragraphs, 1):
-        note = notes[index - 1] if index - 1 < len(notes) and isinstance(notes[index - 1], dict) else {}
-        excerpt = compact(note.get("excerpt") or short_excerpt(paragraph))
-        explanation = compact(note.get("analysis") or "")
-        if not explanation:
-            explanation = deterministic_article_analysis({"title": article.get("title"), "paragraphs": [paragraph]})[
-                "paragraph_notes"
-            ][0]["analysis"]
-        append_text_blocks(blocks, "quote", "原文：", paragraph)
-        append_text_blocks(blocks, "paragraph", "解析：", explanation)
-    signal_lines = [compact(line) for line in analysis.get("signal_analysis") or [] if compact(line)]
-    if signal_lines:
-        blocks.append(block("heading_1", "政治/政策信号"))
-        for line in signal_lines:
-            append_text_blocks(blocks, "paragraph", "", line)
-    chain_lines = [compact(line) for line in analysis.get("policy_chain") or [] if compact(line)]
-    if chain_lines:
-        blocks.append(block("heading_1", "政策链路与观察点"))
-        for line in chain_lines:
-            append_text_blocks(blocks, "bulleted_list_item", "", line)
-    follow_lines = [compact(line) for line in analysis.get("follow_up") or [] if compact(line)]
-    if follow_lines:
-        blocks.append(block("heading_1", "后续验证清单"))
-        for line in follow_lines:
-            append_text_blocks(blocks, "to_do", "", line)
-    blocks.append(block("heading_1", "全文深度解读"))
-    for line in analysis.get("full_analysis") or deterministic_article_analysis(article)["full_analysis"]:
-        append_text_blocks(blocks, "paragraph", "", compact(line))
+    groups = analysis.get("structured_groups") or []
+    if groups:
+        for group in groups:
+            blocks.append(block("heading_3", compact(group.get("title") or "结构组")))
+            for index in group.get("paragraph_indices") or []:
+                if isinstance(index, int) and 1 <= index <= len(paragraphs):
+                    append_original_text_blocks(blocks, paragraphs[index - 1])
+            append_text_blocks(blocks, "paragraph", "解析：", compact(group.get("analysis") or ""))
+    else:
+        notes = list(analysis.get("paragraph_notes") or [])
+        for index, paragraph in enumerate(paragraphs, 1):
+            note = notes[index - 1] if index - 1 < len(notes) and isinstance(notes[index - 1], dict) else {}
+            explanation = compact(note.get("analysis") or "")
+            if not explanation:
+                explanation = deterministic_article_analysis({"title": article.get("title"), "paragraphs": [paragraph]})[
+                    "paragraph_notes"
+                ][0]["analysis"]
+            append_text_blocks(blocks, "quote", "原文：", paragraph)
+            append_text_blocks(blocks, "paragraph", "解析：", explanation)
     return blocks
 
 
@@ -423,25 +1189,86 @@ def build_daily_overview_lines(detailed: list[dict[str, Any]], analysis_by_url: 
     return lines[:5]
 
 
+def issue_overview_with_cache(
+    *,
+    output_root: Path,
+    issue_key: str,
+    manifest: dict[str, Any],
+    detailed: list[dict[str, Any]],
+    analysis_by_url: dict[str, dict[str, Any]],
+    settings: dict[str, Any],
+    reuse_cache: bool = True,
+) -> list[str]:
+    overview_settings = dict(settings.get("overview") or {})
+    if not overview_settings.get("enabled", True):
+        return build_daily_overview_lines(detailed, analysis_by_url)
+    overview_settings.setdefault("openclaw_bin", settings.get("openclaw_bin") or "openclaw")
+    overview_settings.setdefault("agent", settings.get("agent") or "daily-writer")
+    overview_settings.setdefault("model", settings.get("model") or "openai-codex/gpt-5.5")
+    overview_settings.setdefault("thinking", settings.get("thinking") or "medium")
+    overview_settings.setdefault("timeout", settings.get("timeout") or 300)
+    if not overview_settings.get("prompt_template_path"):
+        if overview_settings.get("allow_deterministic_fallback", False):
+            return build_daily_overview_lines(detailed, analysis_by_url)
+        raise RuntimeError("People's Daily overview requires analysis.overview.prompt_template_path")
+
+    if reuse_cache:
+        cached = load_cached_overview(output_root, issue_key)
+        payload = cached.get("overview") if isinstance(cached, dict) else None
+        if isinstance(payload, dict):
+            try:
+                if payload.get("source") == "openclaw":
+                    expected = prompt_metadata(overview_settings)
+                    if payload.get("prompt_id") != expected.get("prompt_id") or payload.get("prompt_sha256") != expected.get("prompt_sha256"):
+                        raise RuntimeError("overview cache prompt metadata mismatch")
+                validate_overview_payload(payload, overview_settings)
+                return [compact(line) for line in payload.get("overview") or [] if compact(line)]
+            except Exception:
+                pass
+
+    print("overview analyze 1/1 今日总览")
+    payload = openclaw_issue_overview(
+        manifest=manifest,
+        detailed=detailed,
+        analysis_by_url=analysis_by_url,
+        openclaw_bin=Path(overview_settings.get("openclaw_bin") or "openclaw").expanduser(),
+        agent=str(overview_settings.get("agent") or "daily-writer"),
+        model=str(overview_settings.get("model") or "openai-codex/gpt-5.5"),
+        thinking=str(overview_settings.get("thinking") or "medium"),
+        timeout=int(overview_settings.get("timeout") or 300),
+        session_prefix=f"pd-{issue_key.replace('-', '')}",
+        settings=overview_settings,
+    )
+    save_cached_overview(output_root, issue_key, payload)
+    write_workflow_checkpoint(
+        output_root,
+        issue_key,
+        "overview",
+        {"status": "done", "source": payload.get("source"), "paragraphs": len(payload.get("overview") or [])},
+    )
+    return [compact(line) for line in payload.get("overview") or [] if compact(line)]
+
+
 def build_date_page_blocks(
     *,
     manifest: dict[str, Any],
     detailed: list[dict[str, Any]],
     detailed_title_by_url: dict[str, str],
     analysis_by_url: dict[str, dict[str, Any]] | None = None,
+    overview_lines: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     analysis_by_url = analysis_by_url or {}
     blocks: list[dict[str, Any]] = [
         block("heading_1", "今日总览"),
     ]
-    for line in build_daily_overview_lines(detailed, analysis_by_url):
+    for line in overview_lines or build_daily_overview_lines(detailed, analysis_by_url):
         blocks.append(block("paragraph", line))
 
     blocks.append(block("heading_1", "全日PDF"))
     selected_pages = news_pages(manifest) or list(manifest.get("pages") or [])
     for page in selected_pages:
         label = page.get("page_label") or page.get("page_no") or ""
-        blocks.append(block("bulleted_list_item", f"{label} PDF", page.get("pdf_url") or None))
+        blocks.append(block("bulleted_list_item", str(label), page.get("pdf_url") or None))
 
     detailed_urls = {article.get("url") for article in detailed}
     articles_by_page: dict[str, list[dict[str, Any]]] = {}
@@ -458,8 +1285,33 @@ def build_date_page_blocks(
         blocks.append(block("heading_1", label))
         for article in articles_by_page.get(page_no, []):
             title = article.get("title") or "未命名"
-            blocks.append(block("heading_2", title))
+            child_title = detailed_title_by_url.get(article.get("url"), "")
+            match = re.search(r"\s(\d{2})\s", child_title)
+            serial_prefix = f"{match.group(1)} " if match else ""
+            blocks.append(block("heading_2", f"{serial_prefix}{title}"))
+            subtitle = compact(article.get("subtitle") or "")
+            if subtitle:
+                blocks.append(block("paragraph", subtitle))
+            author = author_from_meta(str(article.get("meta") or ""))
+            if author:
+                blocks.append(block("paragraph", author))
             blocks.append(block("paragraph", "正文：官方原文", article.get("url") or None))
+            for image in article.get("article_images") or []:
+                image_url = image.get("url")
+                if image_url:
+                    blocks.append({
+                        "object": "block",
+                        "type": "image",
+                        "image": {
+                            "type": "external",
+                            "external": {"url": image_url},
+                            "caption": rich_text(compact(image.get("caption") or "人民日报配图")),
+                        },
+                    })
+            analysis = analysis_by_url.get(article.get("url")) or {}
+            blocks.append(block("heading_3", "整篇深度解读"))
+            for line in analysis.get("full_analysis") or deterministic_article_analysis(article)["full_analysis"]:
+                append_text_blocks(blocks, "paragraph", "", compact(line))
             if article.get("url") in detailed_urls:
                 blocks.append(block("child_page", detailed_title_by_url[article.get("url")]))
     return blocks
@@ -480,6 +1332,8 @@ def list_page_children(page_id: str, token: str, timeout: int) -> list[dict[str,
 
 
 def append_children(page_id: str, token: str, blocks: list[dict[str, Any]], timeout: int) -> None:
+    if any("__child_page_title" in block_value for block_value in blocks):
+        raise RuntimeError("append_children received child_page placeholders; use append_children_with_child_pages")
     for part in chunked(blocks):
         notion_request(
             method="PATCH",
@@ -490,10 +1344,66 @@ def append_children(page_id: str, token: str, blocks: list[dict[str, Any]], time
         )
 
 
+def create_child_page(
+    *,
+    parent_page_id: str,
+    token: str,
+    title: str,
+    blocks: list[dict[str, Any]] | None = None,
+    timeout: int,
+) -> dict[str, Any]:
+    page = notion_request(
+        method="POST",
+        url="https://api.notion.com/v1/pages",
+        token=token,
+        payload={
+            "parent": {"page_id": parent_page_id},
+            "properties": {"title": {"title": rich_text(title)}},
+        },
+        timeout=timeout,
+    )
+    if blocks:
+        append_children(page["id"], token, blocks, timeout)
+    return page
+
+
+def append_children_with_child_pages(
+    page_id: str,
+    token: str,
+    blocks: list[dict[str, Any]],
+    timeout: int,
+) -> int:
+    """Append blocks while creating child pages at placeholder positions."""
+    pending: list[dict[str, Any]] = []
+    created = 0
+    for block_value in blocks:
+        child_title = block_value.get("__child_page_title")
+        if child_title:
+            if pending:
+                append_children(page_id, token, pending, timeout)
+                pending = []
+            create_child_page(parent_page_id=page_id, token=token, title=str(child_title), timeout=timeout)
+            created += 1
+            continue
+        pending.append(block_value)
+    if pending:
+        append_children(page_id, token, pending, timeout)
+    return created
+
+
 def clear_children(page_id: str, token: str, timeout: int) -> None:
     for child in list_page_children(page_id, token, timeout):
         child_id = child.get("id")
         if not child_id:
+            continue
+        if child.get("type") == "child_page":
+            notion_request(
+                method="PATCH",
+                url=f"https://api.notion.com/v1/pages/{child_id}",
+                token=token,
+                payload={"archived": True},
+                timeout=timeout,
+            )
             continue
         notion_request(
             method="PATCH",
@@ -512,7 +1422,6 @@ def create_date_page(
     blocks: list[dict[str, Any]],
     timeout: int,
 ) -> dict[str, Any]:
-    first, rest = blocks[:90], blocks[90:]
     page = notion_request(
         method="POST",
         url="https://api.notion.com/v1/pages",
@@ -520,13 +1429,21 @@ def create_date_page(
         payload={
             "parent": {"page_id": parent_page_id},
             "properties": {"title": {"title": [{"type": "text", "text": {"content": title}}]}},
-            "children": first,
         },
         timeout=timeout,
     )
-    if rest:
-        append_children(page["id"], token, rest, timeout)
+    append_children_with_child_pages(page["id"], token, blocks, timeout)
     return page
+
+
+def update_page_title(page_id: str, token: str, title: str, timeout: int) -> None:
+    notion_request(
+        method="PATCH",
+        url=f"https://api.notion.com/v1/pages/{page_id}",
+        token=token,
+        payload={"properties": {"title": {"title": rich_text(title)}}},
+        timeout=timeout,
+    )
 
 
 def fill_article_pages(
@@ -537,19 +1454,23 @@ def fill_article_pages(
     title_by_url: dict[str, str],
     analysis_by_url: dict[str, dict[str, Any]],
     timeout: int,
+    replace_existing: bool = False,
 ) -> list[dict[str, Any]]:
     children = list_page_children(date_page_id, token, timeout)
     child_pages = {
-        (child.get("child_page") or {}).get("title"): child
+        compact((child.get("child_page") or {}).get("title")): child
         for child in children
         if child.get("type") == "child_page"
     }
     filled: list[dict[str, Any]] = []
     for article in detailed:
         title = title_by_url[article.get("url")]
-        child = child_pages.get(title)
+        child = child_pages.get(compact(title))
         if not child:
-            continue
+            child = create_child_page(parent_page_id=date_page_id, token=token, title=title, timeout=timeout)
+            child_pages[compact(title)] = child
+        elif replace_existing:
+            clear_children(child["id"], token, timeout)
         blocks = build_article_page_blocks(article, analysis_by_url[article.get("url")] or {})
         append_children(child["id"], token, blocks, timeout)
         filled.append({"title": title, "id": child["id"]})
@@ -568,7 +1489,7 @@ def notion_block_text(block_value: dict[str, Any]) -> str:
 def article_child_has_content(child_id: str, token: str, timeout: int) -> bool:
     children = list_page_children(child_id, token, timeout)
     headings = {compact(notion_block_text(child)) for child in children if str(child.get("type") or "").startswith("heading_")}
-    return "结构化原文与解析" in headings and "全文深度解读" in headings and len(children) >= 6
+    return "结构化原文与解析" in headings and len(children) >= 6
 
 
 def inspect_article_children(
@@ -581,7 +1502,7 @@ def inspect_article_children(
 ) -> dict[str, Any]:
     children = list_page_children(date_page_id, token, timeout)
     child_pages = {
-        (child.get("child_page") or {}).get("title"): child
+        compact((child.get("child_page") or {}).get("title")): child
         for child in children
         if child.get("type") == "child_page"
     }
@@ -590,7 +1511,7 @@ def inspect_article_children(
     complete = 0
     for article in detailed:
         title = title_by_url[article.get("url")]
-        child = child_pages.get(title)
+        child = child_pages.get(compact(title))
         if not child:
             missing.append(article)
             continue
@@ -615,15 +1536,9 @@ def append_missing_article_entries(
     title_by_url: dict[str, str],
     timeout: int,
 ) -> None:
-    if not articles:
-        return
-    blocks: list[dict[str, Any]] = [block("heading_1", "补齐文章子页")]
-    for article in articles:
-        title = article.get("title") or "未命名"
-        blocks.append(block("heading_2", title))
-        blocks.append(block("paragraph", "正文：官方原文", article.get("url") or None))
-        blocks.append(block("child_page", title_by_url[article.get("url")]))
-    append_children(date_page_id, token, blocks, timeout)
+    # Notion rejects child_page blocks in append-children payloads. Missing
+    # article pages are created with POST /v1/pages inside fill_article_pages().
+    return
 
 
 def find_existing_child_page(
@@ -644,6 +1559,29 @@ def find_existing_child_page(
 
 def publication_state_path(output_root: Path) -> Path:
     return output_root / "people_daily_publications.json"
+
+
+def find_existing_publication(output_root: Path, issue_key: str) -> dict[str, Any]:
+    state = load_publication_state(publication_state_path(output_root))
+    publication = state.get(issue_key) or {}
+    if publication.get("url"):
+        return publication
+    issue_dir = output_root / issue_key
+    for path in sorted(issue_dir.glob("*.state.json"), reverse=True):
+        try:
+            payload = load_json(path)
+        except Exception:
+            continue
+        notion = payload.get("notion") or {}
+        if notion.get("url"):
+            return {
+                "page_id": notion.get("page_id") or notion.get("id"),
+                "url": notion.get("url"),
+                "status": "complete" if notion.get("child_pages_filled") else notion.get("status"),
+                "source": str(path),
+                "detailed_pages": notion.get("child_pages_filled"),
+            }
+    return {}
 
 
 def load_publication_state(path: Path) -> dict[str, Any]:
@@ -691,6 +1629,7 @@ def publish_to_notion(
     manifest: dict[str, Any],
     force: bool,
     dry_run: bool,
+    skip_analysis: bool = False,
 ) -> dict[str, Any]:
     pd_config = config.get("people_daily_deep_read") or {}
     notion_config = pd_config.get("notion") or {}
@@ -708,7 +1647,40 @@ def publish_to_notion(
     detailed = detailed_articles(manifest, max_page_no)
     title_by_url = {article.get("url"): article_page_title(article, idx) for idx, article in enumerate(detailed, 1)}
     if dry_run:
-        blocks = build_date_page_blocks(manifest=manifest, detailed=detailed, detailed_title_by_url=title_by_url)
+        if skip_analysis:
+            publication = find_existing_publication(output_root, issue_key)
+            if publication.get("url"):
+                return {
+                    "enabled": True,
+                    "attempted": False,
+                    "dry_run": True,
+                    "skipped_duplicate": True,
+                    "url": publication.get("url"),
+                    "source": publication.get("source"),
+                    "detailed_pages": publication.get("detailed_pages"),
+                }
+        analysis_settings = dict(pd_config.get("analysis") or {})
+        analysis_settings.setdefault("openclaw_bin", config.get("openclaw_bin") or "openclaw")
+        try:
+            quality_gate = validate_cached_analysis_quality(
+                output_root=output_root,
+                issue_key=issue_key,
+                articles=detailed,
+                settings=analysis_settings,
+            )
+        except Exception as exc:  # noqa: BLE001
+            quality_gate = {"status": "failed", "error": str(exc)}
+        cached_overview = load_cached_overview(output_root, issue_key)
+        overview_payload = cached_overview.get("overview") if isinstance(cached_overview, dict) else None
+        overview_lines = []
+        if isinstance(overview_payload, dict):
+            overview_lines = [compact(line) for line in overview_payload.get("overview") or [] if compact(line)]
+        blocks = build_date_page_blocks(
+            manifest=manifest,
+            detailed=detailed,
+            detailed_title_by_url=title_by_url,
+            overview_lines=overview_lines or None,
+        )
         return {
             "enabled": True,
             "attempted": False,
@@ -716,6 +1688,8 @@ def publish_to_notion(
             "date_title": format_issue_title(issue_date),
             "date_blocks": len(blocks),
             "detailed_pages": len(detailed),
+            "quality_gate": quality_gate,
+            "overview_cached": bool(overview_lines),
         }
 
     env = os.environ.copy()
@@ -790,12 +1764,18 @@ def publish_to_notion(
             title_by_url=title_by_url,
             timeout=timeout,
         )
+        if skip_analysis:
+            raise RuntimeError("publish-only resume found partial Notion page; refusing repair without analysis")
         analysis_settings = dict(pd_config.get("analysis") or {})
         analysis_settings.setdefault("openclaw_bin", config.get("openclaw_bin") or "openclaw")
-        analysis_by_url: dict[str, dict[str, Any]] = {}
-        for idx, article in enumerate(repair_targets, 1):
-            print(f"repair analyze {idx}/{len(repair_targets)} {article.get('title')}")
-            analysis_by_url[article.get("url")] = analyze_article(article, analysis_settings, issue_date.strftime("%Y%m%d"))
+        analysis_by_url = analyze_articles_with_cache(
+            output_root=output_root,
+            issue_key=issue_key,
+            articles=repair_targets,
+            settings=analysis_settings,
+            reuse_cache=True,
+            label="repair analyze",
+        )
         filled = fill_article_pages(
             date_page_id=candidate_page_id,
             token=token,
@@ -803,6 +1783,7 @@ def publish_to_notion(
             title_by_url=title_by_url,
             analysis_by_url=analysis_by_url,
             timeout=timeout,
+            replace_existing=True,
         )
         repaired_status = inspect_article_children(
             date_page_id=candidate_page_id,
@@ -835,18 +1816,41 @@ def publish_to_notion(
             "filled_now": len(filled),
         }
 
+    if skip_analysis:
+        raise RuntimeError("publish-only resume found no existing Notion page; refusing to rebuild without analysis")
+
     analysis_settings = dict(pd_config.get("analysis") or {})
     analysis_settings.setdefault("openclaw_bin", config.get("openclaw_bin") or "openclaw")
-    analysis_by_url: dict[str, dict[str, Any]] = {}
-    for idx, article in enumerate(detailed, 1):
-        print(f"analyze {idx}/{len(detailed)} {article.get('title')}")
-        analysis_by_url[article.get("url")] = analyze_article(article, analysis_settings, issue_date.strftime("%Y%m%d"))
+    analysis_by_url = analyze_articles_with_cache(
+        output_root=output_root,
+        issue_key=issue_key,
+        articles=detailed,
+        settings=analysis_settings,
+        reuse_cache=True,
+        label="analyze",
+    )
+    validate_cached_analysis_quality(
+        output_root=output_root,
+        issue_key=issue_key,
+        articles=detailed,
+        settings=analysis_settings,
+    )
+    overview_lines = issue_overview_with_cache(
+        output_root=output_root,
+        issue_key=issue_key,
+        manifest=manifest,
+        detailed=detailed,
+        analysis_by_url=analysis_by_url,
+        settings=analysis_settings,
+        reuse_cache=True,
+    )
 
     blocks = build_date_page_blocks(
         manifest=manifest,
         detailed=detailed,
         detailed_title_by_url=title_by_url,
         analysis_by_url=analysis_by_url,
+        overview_lines=overview_lines,
     )
 
     existing_page_id = ""
@@ -859,8 +1863,9 @@ def publish_to_notion(
         existing_url = str(notion_existing.get("url") or "")
 
     if existing_page_id:
+        update_page_title(existing_page_id, token, title, timeout)
         clear_children(existing_page_id, token, timeout)
-        append_children(existing_page_id, token, blocks, timeout)
+        append_children_with_child_pages(existing_page_id, token, blocks, timeout)
         page = {"id": existing_page_id, "url": existing_url}
     else:
         page = create_date_page(
@@ -926,9 +1931,16 @@ def collect_or_load_manifest(args: argparse.Namespace, config: dict[str, Any]) -
         if args.date:
             day = dt.date.fromisoformat(args.date)
         start_url = layout_url_for_date(day, str(pd_config.get("base_url") or "https://paper.people.com.cn/rmrb/pc"))
+    output_root = Path(pd_config.get("output_dir") or "~/.openclaw/workspace/people-daily-deep-read").expanduser()
+    issue_date = issue_date_from_layout_url(start_url)
+    existing_manifest = output_root / issue_date.strftime("%Y-%m-%d") / "manifest.json"
+    if existing_manifest.exists() and not args.force:
+        manifest = load_json(existing_manifest)
+        manifest.setdefault("workflow", {})["resumed_from_manifest"] = str(existing_manifest)
+        return manifest
     manifest = collect_issue(
         start_url=start_url,
-        output_root=Path(pd_config.get("output_dir") or "~/.openclaw/workspace/people-daily-deep-read").expanduser(),
+        output_root=output_root,
         max_pages=int(args.max_pages or pd_config.get("max_pages") or 99),
         delay_seconds=float(args.delay if args.delay is not None else pd_config.get("crawl_delay_seconds", 120)),
         download_pdfs=not args.no_pdf,
@@ -1035,7 +2047,7 @@ def deliver_people_daily_link(*, config: dict[str, Any], manifest: dict[str, Any
     if account:
         cmd.extend(["--account", account])
     try:
-        completed = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout, check=False)
+        completed = run_process_group(cmd, text=True, capture_output=True, timeout=timeout, check=False)
         return {
             "enabled": True,
             "attempted": True,
@@ -1044,6 +2056,62 @@ def deliver_people_daily_link(*, config: dict[str, Any], manifest: dict[str, Any
             "stdout": completed.stdout[-1200:],
             "stderr": completed.stderr[-1200:],
         }
+    except Exception as exc:  # noqa: BLE001
+        return {"enabled": True, "attempted": True, "provider": "openclaw_cli", "exception": str(exc)}
+
+
+def deliver_people_daily_status(
+    *,
+    config: dict[str, Any],
+    manifest: dict[str, Any],
+    status: str,
+    reason: str = "",
+    publication: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    pd_config = config.get("people_daily_deep_read") or {}
+    telegram = (pd_config.get("telegram") or config.get("telegram") or {})
+    if not telegram.get("enabled"):
+        return {"enabled": False, "attempted": False}
+    target = str(telegram.get("target") or "").strip()
+    if not target:
+        return {"enabled": True, "attempted": False, "reason": "missing telegram target"}
+    title = format_issue_title(issue_date_from_manifest(manifest))
+    labels = {"complete": "完成", "partial": "部分完成", "failed": "失败"}
+    lines = [f"人民日报深读{labels.get(status, status)}：{title}"]
+    url = str((publication or {}).get("url") or "").strip()
+    if url:
+        lines.append(f"Notion：{url}")
+    if reason:
+        lines.append(f"状态：{reason[:260]}")
+    message = "\n".join(lines)
+    timeout = int(telegram.get("timeout") or 120)
+    method = str(telegram.get("delivery_method") or "").strip().lower()
+    if str(telegram.get("channel") or "telegram") == "telegram" and method == "bot_api":
+        token = telegram_bot_token_from_config(Path(telegram.get("openclaw_config_path") or "~/.openclaw/openclaw.json"))
+        if not token:
+            return {"enabled": True, "attempted": False, "reason": "missing channels.telegram.botToken"}
+        try:
+            return send_telegram_bot_api(bot_token=token, chat_id=target, text=message, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            return {"enabled": True, "attempted": True, "provider": "telegram_bot_api", "exception": str(exc)}
+    openclaw_bin = Path(config.get("openclaw_bin") or "openclaw").expanduser()
+    cmd = [
+        str(openclaw_bin),
+        "message",
+        "send",
+        "--channel",
+        str(telegram.get("channel") or "telegram"),
+        "--target",
+        target,
+        "--message",
+        message,
+    ]
+    account = str(telegram.get("account") or "").strip()
+    if account:
+        cmd.extend(["--account", account])
+    try:
+        completed = run_process_group(cmd, text=True, capture_output=True, timeout=timeout, check=False)
+        return {"enabled": True, "attempted": True, "provider": "openclaw_cli", "returncode": completed.returncode, "stdout": completed.stdout[-1200:], "stderr": completed.stderr[-1200:]}
     except Exception as exc:  # noqa: BLE001
         return {"enabled": True, "attempted": True, "provider": "openclaw_cli", "exception": str(exc)}
 
@@ -1060,6 +2128,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-validate", action="store_true", help="Skip manifest sanity checks")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--analysis-only",
+        action="store_true",
+        help="Run/reuse article analysis cache and stop before Notion publish/Telegram notify.",
+    )
+    parser.add_argument(
+        "--from-stage",
+        choices=["collect", "validate", "analyze", "publish", "notify"],
+        default="",
+        help="Resume workflow from a stage. publish/notify reuse the existing manifest and skip article analysis reruns.",
+    )
     return parser.parse_args()
 
 
@@ -1069,22 +2148,202 @@ def main() -> int:
     config_path = (script_dir / args.config).resolve()
     config = load_json(config_path)
     manifest = collect_or_load_manifest(args, config)
+    pd_config = config.get("people_daily_deep_read") or {}
+    output_root = Path(pd_config.get("output_dir") or "~/.openclaw/workspace/people-daily-deep-read").expanduser()
+    issue_key = issue_date_from_manifest(manifest).strftime("%Y-%m-%d")
+    report_path = output_root / issue_key / f"{issue_key.replace('-', '')}_people_daily_deep_read.md"
+    checkpoint_dir = output_root / issue_key / "checkpoints"
+    task = background_tasks.create_or_resume_task(
+        task_type="people_daily_deep_read",
+        task_id=f"people_daily_deep_read-{issue_key}",
+        key=issue_key,
+        requested_by=os.environ.get("OPENCLAW_REQUESTED_BY", "systemd/supervisor"),
+        input_summary=f"生成{issue_key}人民日报深读，完成标准：本地深读、Notion 发布、Telegram Notion 链接通知。",
+        success_criteria=[
+            str(report_path),
+            str(output_root / issue_key / "manifest.json"),
+            str(checkpoint_dir / "publish.json"),
+            str(checkpoint_dir / "notify.json"),
+        ],
+        retry_policy={"mode": "supervisor", "max_immediate_retries": 0, "retry_delay_minutes": 20},
+        review_required=False,
+        metadata={"issue": issue_key},
+    )
+    background_task_id = str(task["task_id"])
+    os.environ["OPENCLAW_BACKGROUND_TASK_ID"] = background_task_id
+    background_tasks.add_artifacts(background_task_id, [report_path, output_root / issue_key / "manifest.json", checkpoint_dir])
+    write_workflow_checkpoint(output_root, issue_key, "dag", {"status": "defined", "dag": people_daily_dag_spec()})
+    write_workflow_checkpoint(
+        output_root,
+        issue_key,
+        "collect",
+        {
+            "status": "done",
+            "pages": len(manifest.get("pages") or []),
+            "articles": len(manifest.get("articles") or []),
+            "resumed_from_manifest": (manifest.get("workflow") or {}).get("resumed_from_manifest"),
+        },
+    )
     if not args.no_validate:
-        pd_config = config.get("people_daily_deep_read") or {}
         max_page_no = int((pd_config.get("analysis") or {}).get("detailed_max_page_no") or 4)
-        validate_manifest(manifest, max_page_no=max_page_no)
+        try:
+            validate_manifest(manifest, max_page_no=max_page_no)
+            write_workflow_checkpoint(output_root, issue_key, "validate", {"status": "done", "max_page_no": max_page_no})
+        except Exception as exc:  # noqa: BLE001
+            write_workflow_checkpoint(output_root, issue_key, "validate", {"status": "failed", "error": str(exc), "max_page_no": max_page_no})
+            background_tasks.fail_task(
+                background_task_id,
+                error_kind="validation_failed",
+                error_summary=str(exc),
+                checkpoint_path=checkpoint_dir / "validate.json",
+                artifacts=[output_root / issue_key / "manifest.json"],
+                needs_review=False,
+            )
+            raise
     print(f"issue={manifest['issue']['date']}")
     print(f"pages={len(manifest.get('pages') or [])}")
     print(f"articles={len(manifest.get('articles') or [])}")
-    if args.no_publish:
+    if args.analysis_only or args.from_stage == "analyze":
+        max_page_no = int((pd_config.get("analysis") or {}).get("detailed_max_page_no") or 4)
+        detailed = detailed_articles(manifest, max_page_no)
+        analysis_settings = dict(pd_config.get("analysis") or {})
+        analysis_settings.setdefault("openclaw_bin", config.get("openclaw_bin") or "openclaw")
+        if args.dry_run:
+            cached = sum(1 for idx, article in enumerate(detailed, 1) if load_cached_analysis(output_root, issue_key, article, idx))
+            write_workflow_checkpoint(output_root, issue_key, "analyze", {"status": "dry_run", "cached": cached, "total": len(detailed)})
+            print(json.dumps({"analysis": {"dry_run": True, "cached": cached, "total": len(detailed)}}, ensure_ascii=False, indent=2))
+            return 0
+        analysis_by_url = analyze_articles_with_cache(
+            output_root=output_root,
+            issue_key=issue_key,
+            articles=detailed,
+            settings=analysis_settings,
+            reuse_cache=True,
+            label="analyze",
+        )
+        validate_cached_analysis_quality(
+            output_root=output_root,
+            issue_key=issue_key,
+            articles=detailed,
+            settings=analysis_settings,
+        )
+        overview_lines = issue_overview_with_cache(
+            output_root=output_root,
+            issue_key=issue_key,
+            manifest=manifest,
+            detailed=detailed,
+            analysis_by_url=analysis_by_url,
+            settings=analysis_settings,
+            reuse_cache=True,
+        )
+        print(json.dumps({"analysis": {"completed": len(analysis_by_url), "total": len(detailed)}, "overview": {"paragraphs": len(overview_lines)}}, ensure_ascii=False, indent=2))
         return 0
-    result = publish_to_notion(config=config, manifest=manifest, force=args.force, dry_run=args.dry_run)
-    delivery = deliver_people_daily_link(config=config, manifest=manifest, publication=result)
+    if args.no_publish:
+        write_workflow_checkpoint(output_root, issue_key, "publish", {"status": "skipped", "reason": "--no-publish"})
+        return 0
+    if args.from_stage == "notify":
+        publication = find_existing_publication(output_root, issue_key)
+        if not publication.get("url"):
+            write_workflow_checkpoint(output_root, issue_key, "notify", {"status": "failed", "attempted": False, "reason": "missing existing Notion publication"})
+            print(json.dumps({"telegram": {"enabled": True, "attempted": False, "reason": "missing existing Notion publication"}}, ensure_ascii=False, indent=2))
+            return 7
+        if args.dry_run:
+            delivery = {"enabled": True, "attempted": False, "reason": "dry-run delivery disabled"}
+        else:
+            delivery = deliver_people_daily_status(
+                config=config,
+                manifest=manifest,
+                publication=publication,
+                status="complete",
+            )
+        write_workflow_checkpoint(
+            output_root,
+            issue_key,
+            "notify",
+            {"status": "failed" if delivery.get("exception") or int(delivery.get("returncode") or 0) != 0 else "done", "attempted": bool(delivery.get("attempted")), "returncode": delivery.get("returncode"), "exception": delivery.get("exception"), "notion_url": publication.get("url"), "formal": True, "requires_formal_retry": False},
+        )
+        print(json.dumps({"telegram": delivery, "publication": publication}, ensure_ascii=False, indent=2))
+        if delivery.get("enabled") and delivery.get("attempted") and (delivery.get("exception") or int(delivery.get("returncode") or 0) != 0):
+            return 7
+        return 0
+    try:
+        result = publish_to_notion(
+            config=config,
+            manifest=manifest,
+            force=args.force,
+            dry_run=args.dry_run,
+            skip_analysis=args.from_stage == "publish",
+        )
+    except Exception as exc:  # noqa: BLE001 - notify and let systemd retry the publish stage
+        write_workflow_checkpoint(output_root, issue_key, "publish", {"status": "failed", "error": str(exc)})
+        delivery = deliver_people_daily_status(
+            config=config,
+            manifest=manifest,
+            status="failed",
+            reason=str(exc),
+        )
+        write_workflow_checkpoint(
+            output_root,
+            issue_key,
+            "notify",
+            {"status": "failed" if delivery.get("exception") or int(delivery.get("returncode") or 0) != 0 else "done", "attempted": bool(delivery.get("attempted")), "exception": delivery.get("exception"), "returncode": delivery.get("returncode"), "formal": False, "requires_formal_retry": True},
+        )
+        print(json.dumps({"notion": {"enabled": True, "attempted": True, "error": str(exc)}, "telegram": delivery}, ensure_ascii=False, indent=2))
+        error_path = background_tasks.write_error(
+            background_task_id,
+            error_kind="notion_publish_failed",
+            error_summary=str(exc),
+            details={"checkpoint": str(checkpoint_dir / "publish.json")},
+        )
+        background_tasks.fail_task(
+            background_task_id,
+            error_kind="notion_publish_failed",
+            error_summary=str(exc),
+            checkpoint_path=checkpoint_dir / "publish.json",
+            artifacts=[report_path, output_root / issue_key / "manifest.json", error_path],
+            needs_review=False,
+        )
+        return 6
+    write_workflow_checkpoint(
+        output_root,
+        issue_key,
+        "publish",
+        {"status": "dry_run" if result.get("dry_run") else "done" if result.get("url") else "partial", "url": result.get("url"), "attempted": bool(result.get("attempted")), "reason": result.get("reason")},
+    )
+    if args.dry_run:
+        delivery = {"enabled": True, "attempted": False, "reason": "dry-run delivery disabled"}
+    else:
+        delivery = deliver_people_daily_status(
+            config=config,
+            manifest=manifest,
+            publication=result,
+            status="complete" if result.get("url") else "partial",
+            reason="" if result.get("url") else str(result.get("reason") or "missing Notion url"),
+        )
+    write_workflow_checkpoint(
+        output_root,
+        issue_key,
+        "notify",
+        {"status": "failed" if delivery.get("exception") or int(delivery.get("returncode") or 0) != 0 else "done", "attempted": bool(delivery.get("attempted")), "returncode": delivery.get("returncode"), "exception": delivery.get("exception"), "notion_url": result.get("url"), "formal": bool(result.get("url")), "requires_formal_retry": not bool(result.get("url"))},
+    )
     print(json.dumps({"notion": result, "telegram": delivery}, ensure_ascii=False, indent=2))
     if result.get("enabled") and not result.get("attempted") and not result.get("dry_run") and not result.get("skipped_duplicate"):
         return 2
     if delivery.get("enabled") and delivery.get("attempted") and (delivery.get("exception") or int(delivery.get("returncode") or 0) != 0):
+        background_tasks.fail_task(
+            background_task_id,
+            error_kind="telegram_delivery_failed",
+            error_summary="人民日报深读 Telegram Notion 链接通知失败，前序产物已生成。",
+            checkpoint_path=checkpoint_dir / "notify.json",
+            artifacts=[report_path, output_root / issue_key / "manifest.json"],
+            needs_review=False,
+        )
         return 7
+    background_tasks.finish_task(
+        background_task_id,
+        artifacts=[report_path, output_root / issue_key / "manifest.json", checkpoint_dir / "publish.json", checkpoint_dir / "notify.json"],
+        summary=f"{issue_key} 人民日报深读完成；Notion={result.get('url') or ''}",
+    )
     return 0
 
 
