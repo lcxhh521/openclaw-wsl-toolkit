@@ -239,6 +239,7 @@ namespace OpenClawLocalMonitor
         public long CacheWriteTokens;
         public double EstimatedCost;
         public bool HasEstimatedCost;
+        public string CostPeriod = "";
         public string SessionKey = "";
         public long SessionTotalTokens;
         public long SessionContextTokens;
@@ -2480,6 +2481,8 @@ namespace OpenClawLocalMonitor
 
             s.TokenFlows.Clear();
             s.TokenFlows.Add("缓存 · " + (cache.Stale ? "数据较旧" : "已更新") + " · " + (cache.AgeMs >= 0 ? Age(cache.AgeMs) + "前" : cache.GeneratedAt) + " · 控制中心未查询 gateway");
+            if (cache.HasEstimatedCost)
+                s.TokenFlows.Add("成本 · " + (string.IsNullOrWhiteSpace(cache.CostPeriod) ? "本自然月" : cache.CostPeriod) + "累计 · " + FormatUsd(cache.EstimatedCost));
             foreach (var line in cache.Lines.Take(8))
                 s.TokenFlows.Add(line);
 
@@ -2515,9 +2518,13 @@ namespace OpenClawLocalMonitor
                 summary.TotalTokens = Math.Max(0, ToLong(Get(today, "totalTokens")));
                 summary.CacheReadTokens = Math.Max(0, ToLong(Get(today, "cacheReadTokens")));
                 summary.CacheWriteTokens = Math.Max(0, ToLong(Get(today, "cacheWriteTokens")));
-                var costObj = Get(today, "estimatedCost");
+                var month = AsDict(Get(payload, "currentMonth"));
+                var monthCostObj = Get(month, "estimatedCost");
+                var todayCostObj = Get(today, "estimatedCost");
+                var costObj = monthCostObj ?? todayCostObj;
                 summary.EstimatedCost = ToDouble(costObj);
                 summary.HasEstimatedCost = costObj != null && summary.EstimatedCost > 0;
+                summary.CostPeriod = Convert.ToString(Get(month, "month") ?? "");
 
                 var session = AsDict(Get(payload, "currentTelegramSession"));
                 summary.SessionKey = Convert.ToString(Get(session, "sessionKey") ?? "");

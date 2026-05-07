@@ -148,7 +148,7 @@ Token and cost cards on the main panel are cache-only. The panel reads:
 ~/.openclaw/monitor-cache/usage-summary.json
 ```
 
-It never calls `sessions.list`, `models.list`, `logs.tail`, `tasks audit`, or a monthly session scan to render those cards. If the cache is missing, the cards stay hidden or show stale/cache status; the panel does not query gateway to fill the gap.
+It never calls `sessions.list`, `models.list`, `logs.tail`, `tasks audit`, or a monthly session scan to render those cards. If the cache is missing, the cards stay hidden or show stale/cache status; the panel does not query gateway to fill the gap. Token cards show today's cached flow, while the cost card shows the current natural month's accumulated local estimate and resets naturally at the start of a new month.
 
 Install the optional WSL timer from this directory:
 

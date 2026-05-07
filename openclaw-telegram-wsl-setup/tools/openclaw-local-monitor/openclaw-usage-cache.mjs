@@ -11,7 +11,12 @@ const now = Date.now();
 const dayStart = new Date();
 dayStart.setHours(0, 0, 0, 0);
 const dayStartMs = dayStart.getTime();
-const maxFiles = Number(process.env.OPENCLAW_USAGE_CACHE_MAX_FILES || 250);
+const monthStart = new Date();
+monthStart.setDate(1);
+monthStart.setHours(0, 0, 0, 0);
+const monthStartMs = monthStart.getTime();
+const monthKey = `${monthStart.getFullYear()}-${String(monthStart.getMonth() + 1).padStart(2, "0")}`;
+const maxFiles = Number(process.env.OPENCLAW_USAGE_CACHE_MAX_FILES || 1000);
 
 const out = {
   generatedAt: new Date(now).toISOString(),
@@ -19,6 +24,16 @@ const out = {
   stale: false,
   source: "offline-session-cache",
   today: {
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    estimatedCost: null
+  },
+  currentMonth: {
+    month: monthKey,
+    monthStart: new Date(monthStartMs).toISOString(),
     inputTokens: 0,
     outputTokens: 0,
     totalTokens: 0,
@@ -81,7 +96,7 @@ function collectSessionFiles() {
     }
   }
   return files
-    .filter((file) => file.mtimeMs >= dayStartMs || now - file.mtimeMs <= 24 * 60 * 60 * 1000)
+    .filter((file) => file.mtimeMs >= monthStartMs || now - file.mtimeMs <= 24 * 60 * 60 * 1000)
     .sort((a, b) => b.mtimeMs - a.mtimeMs)
     .slice(0, maxFiles);
 }
@@ -114,7 +129,7 @@ function addUsageEvent(row, usage, base, seen, buckets) {
   if (!(input || output || cacheRead || cacheWrite || totalTokens || cost)) return;
 
   const eventMs = toMs(row.timestamp ?? row.ts ?? row.createdAt ?? row.updatedAt, base.mtimeMs);
-  if (eventMs < dayStartMs) return;
+  if (eventMs < monthStartMs) return;
 
   const provider = String(row.provider ?? base.provider ?? "-");
   const model = String(row.model ?? base.model ?? "-");
@@ -123,12 +138,23 @@ function addUsageEvent(row, usage, base, seen, buckets) {
   if (seen.has(dedupe)) return;
   seen.add(dedupe);
 
-  out.today.inputTokens += input;
-  out.today.outputTokens += output;
-  out.today.cacheReadTokens += cacheRead;
-  out.today.cacheWriteTokens += cacheWrite;
-  out.today.totalTokens += totalTokens || input + output;
-  if (cost > 0) out.today.estimatedCost = (out.today.estimatedCost || 0) + cost;
+  if (eventMs >= dayStartMs) {
+    out.today.inputTokens += input;
+    out.today.outputTokens += output;
+    out.today.cacheReadTokens += cacheRead;
+    out.today.cacheWriteTokens += cacheWrite;
+    out.today.totalTokens += totalTokens || input + output;
+    if (cost > 0) out.today.estimatedCost = (out.today.estimatedCost || 0) + cost;
+  }
+
+  if (eventMs >= monthStartMs) {
+    out.currentMonth.inputTokens += input;
+    out.currentMonth.outputTokens += output;
+    out.currentMonth.cacheReadTokens += cacheRead;
+    out.currentMonth.cacheWriteTokens += cacheWrite;
+    out.currentMonth.totalTokens += totalTokens || input + output;
+    if (cost > 0) out.currentMonth.estimatedCost = (out.currentMonth.estimatedCost || 0) + cost;
+  }
 
   const bucket = bucketFor(buckets, provider + "/" + model, provider + "/" + model);
   bucket.inputTokens += input;

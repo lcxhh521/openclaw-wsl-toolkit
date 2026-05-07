@@ -61,7 +61,7 @@ Windows
 
 第三块是本机控制中心。它是一个 Windows 小程序，用来启动/关闭 OpenClaw、查看 gateway 和 Telegram 是否可用、观察后台任务、Token/成本流向、最近日志和本地产物心跳。它也可以待在系统托盘里，不需要每次都开浏览器。
 
-现在的控制中心默认走轻量路线：主面板只看生命体征，不再周期性展开 `sessions.list`、`models.list`、`logs.tail`、`tasks audit/show` 这类容易挤占 gateway 的重查询。Token/成本卡片来自离线缓存 `~/.openclaw/monitor-cache/usage-summary.json`，由可选 WSL timer 约每 10 分钟扫描本地 session 文件生成；浏览器版 Control 保留为 `原生 Control` 高级入口，打开前会提示，因为它可能触发较重的会话/模型查询。
+现在的控制中心默认走轻量路线：主面板只看生命体征，不再周期性展开 `sessions.list`、`models.list`、`logs.tail`、`tasks audit/show` 这类容易挤占 gateway 的重查询。Token/成本卡片来自离线缓存 `~/.openclaw/monitor-cache/usage-summary.json`，由可选 WSL timer 约每 10 分钟扫描本地 session 文件生成；Token 卡片显示今日流量，成本卡片显示当前自然月累计估算，月初自然归零；浏览器版 Control 保留为 `原生 Control` 高级入口，打开前会提示，因为它可能触发较重的会话/模型查询。
 
 第四块是市场信息浸泡模块。它是一个可选 `openclaw-job-module`，现在包含两条工作流：一条是 7x24 财经快讯的每日快讯简报，一条是《人民日报》电子版/PDF 的长文本深读。前者按时间段抓取财经快讯流，去重后交给 OpenClaw 写成 Notion 简报；后者按天抓取《人民日报》全部版面、PDF 和文章页，并在 Notion 的日期页下生成版面归档和文章深读子页。这个模块不是基础安装必需项，只有用户明确要市场日报、信息浸泡、人民日报深读或 Notion 闭环时才安装。
 
@@ -168,7 +168,7 @@ openclaw-telegram-wsl-setup/tools/openclaw-local-monitor/
 - gateway 和 Telegram 是否可用。
 - Telegram 是否已连接；冷启动细节会在顶部状态框内部用临时进度条显示，而不是塞进 Telegram 卡片。
 - 后台是否存在 `queued/running` task、活跃 TaskFlow，或正在持续产出的本地 daemon / 工作区产物心跳。
-- 今日 Token / 输入 Token / 输出 Token / 缓存读取 / 已记录成本。这些卡片只读离线缓存，约每 10 分钟更新一次；金额只是本地估算，不等同服务商账单。
+- 今日 Token / 输入 Token / 输出 Token / 缓存读取 / 已记录成本。这些卡片只读离线缓存，约每 10 分钟更新一次；Token 是今日流量，成本是当前自然月累计估算，金额不等同服务商账单。
 - 最近会话和少量状态提醒；主面板不把日志和任务审计当作自动刷新源。
 - 系统托盘常驻能力。
 
