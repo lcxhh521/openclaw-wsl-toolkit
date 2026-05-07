@@ -97,9 +97,11 @@ Windows
         |   |-- Generate-OpenClawMonitorIcon.ps1
         |   |-- Install-OpenClawMonitor.ps1
         |   |-- Install-UsageCache.ps1
+        |   |-- Install-ReliabilityObserver.ps1
         |   |-- Install-Autostart.ps1
         |   |-- Uninstall-Autostart.ps1
         |   |-- openclaw-usage-cache.mjs
+        |   |-- openclaw-reliability-observer.mjs
         |   |-- OpenClawMonitor.ico
         |   `-- README.md
         |-- openclaw-netwatch/
@@ -192,6 +194,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-UsageCache.ps1
 ```
 
 它会在 Ubuntu 里安装 `openclaw-usage-cache` 和 systemd user timer，约每 10 分钟写一次 `~/.openclaw/monitor-cache/usage-summary.json`。这个采集器只扫描本地 session 文件，不连接 gateway、不重启 OpenClaw、不改配置、不碰 secrets。
+
+如需让控制中心解释最近的“Telegram 没回但不知道为什么”，在同一目录安装可选 reliability observer：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-ReliabilityObserver.ps1
+```
+
+它会约每 1 分钟写一次 `~/.openclaw/monitor-cache/reliability-status.json`，数据来自本地日志、`openclaw-gateway.service` 用户 journal 和 stability 文件。它只做观察：不发 Telegram、不自动重试、不重启 gateway、不调用 `tasks audit/show`、不改配置/模型/binding/session，也不碰 secrets。
 
 ### 原生 Control
 

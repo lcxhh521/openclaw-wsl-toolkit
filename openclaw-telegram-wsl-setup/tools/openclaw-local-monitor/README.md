@@ -157,3 +157,21 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-UsageCache.ps1
 ```
 
 The timer installs `~/.local/bin/openclaw-usage-cache` and runs it every 10 minutes. The collector scans local session files offline and writes the small JSON cache. It does not connect to the gateway, does not restart OpenClaw, does not change config, and does not touch secrets.
+
+## Reliability Observer
+
+The main panel can also read a local reliability cache:
+
+```text
+~/.openclaw/monitor-cache/reliability-status.json
+```
+
+Install the optional WSL timer from this directory:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-ReliabilityObserver.ps1
+```
+
+The observer runs about once per minute and reads only local gateway logs, the user journal for `openclaw-gateway.service`, and recent stability files. It detects recent signals such as model overload, Telegram `sendMessage` delivery failure, provider/network timeout, session lock, context overflow, and gateway shutdown/startup incidents.
+
+It is intentionally observational: it does not send Telegram messages, retry commands, restart OpenClaw, call gateway RPC, call `tasks audit/show`, change config, or touch secrets. The control center uses the cache to explain why a Telegram command may have gone silent without adding new gateway load.

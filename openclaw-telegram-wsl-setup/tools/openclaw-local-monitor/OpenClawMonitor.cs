@@ -246,6 +246,18 @@ namespace OpenClawLocalMonitor
         public readonly List<string> Lines = new List<string>();
     }
 
+    sealed class ReliabilitySummary
+    {
+        public bool Available;
+        public bool Stale;
+        public string Status = "";
+        public string Error = "";
+        public string GeneratedAt = "";
+        public long AgeMs = -1;
+        public string Summary = "";
+        public readonly List<string> Lines = new List<string>();
+    }
+
     sealed class MonitorForm : Form
     {
         const string WslDistro = "Ubuntu";
@@ -2137,6 +2149,7 @@ namespace OpenClawLocalMonitor
             {
                 FillStartupLightPlaceholders(snapshot);
                 FillUsageCacheSnapshot(snapshot);
+                FillReliabilitySnapshot(snapshot);
                 if (!string.IsNullOrWhiteSpace(startupNote) && snapshot.GatewayOk)
                     snapshot.StatusLine = startupNote + " | " + snapshot.StatusLine;
                 return snapshot;
@@ -2144,6 +2157,7 @@ namespace OpenClawLocalMonitor
 
             FillSteadyLightPlaceholders(snapshot);
             FillUsageCacheSnapshot(snapshot);
+            FillReliabilitySnapshot(snapshot);
             FillConversationActivity(snapshot);
             FillTaskTableFallback(snapshot);
             if (!string.IsNullOrWhiteSpace(startupNote) && snapshot.GatewayOk)
@@ -2533,6 +2547,104 @@ namespace OpenClawLocalMonitor
             {
                 summary.Error = ex.Message;
                 return summary;
+            }
+        }
+
+        void FillReliabilitySnapshot(Snapshot s)
+        {
+            var reliability = ReadReliabilitySummary();
+            if (!reliability.Available)
+            {
+                if (!string.IsNullOrWhiteSpace(reliability.Error))
+                    s.Logs.Insert(0, "可靠性 · 暂无 observer 缓存：" + Trim(reliability.Error, 80));
+                return;
+            }
+
+            var age = reliability.AgeMs >= 0 ? Age(reliability.AgeMs) + "前" : "-";
+            var statusLabel = ReliabilityStatusLabel(reliability.Status);
+            var line = "可靠性 · " + statusLabel + " · " + Trim(reliability.Summary, 96) + " · " + age;
+            s.Logs.Insert(0, line);
+            foreach (var detail in reliability.Lines.Take(3).Reverse())
+                s.Logs.Insert(1, "  " + detail);
+
+            if (reliability.Status == "risk" && s.State != "Problem")
+                s.State = "Degraded";
+            if ((reliability.Status == "risk" || reliability.Status == "warn") && string.IsNullOrWhiteSpace(s.StatusLine))
+                s.StatusLine = "最近有可靠性事件；控制中心已从本地 observer 缓存读取原因。";
+            else if (reliability.Stale && string.IsNullOrWhiteSpace(s.StatusLine))
+                s.StatusLine = "可靠性 observer 缓存较旧；主面板仍保持只读缓存模式。";
+        }
+
+        ReliabilitySummary ReadReliabilitySummary()
+        {
+            var summary = new ReliabilitySummary();
+            try
+            {
+                var script = "cat ~/.openclaw/monitor-cache/reliability-status.json 2>/dev/null";
+                var result = RunProcess("wsl.exe", new[] { "-d", WslDistro, "--", "bash", "-lc", script }, 3000);
+                if (!result.Ok || string.IsNullOrWhiteSpace(result.Stdout))
+                {
+                    summary.Error = "未找到 ~/.openclaw/monitor-cache/reliability-status.json";
+                    return summary;
+                }
+
+                var payload = AsDict(json.DeserializeObject(ExtractJsonObject(result.Stdout)));
+                summary.Status = (Convert.ToString(Get(payload, "status") ?? "") ?? "").Trim().ToLowerInvariant();
+                summary.GeneratedAt = Convert.ToString(Get(payload, "generatedAt") ?? "");
+                summary.Summary = Convert.ToString(Get(payload, "summary") ?? "");
+                summary.AgeMs = UsageCacheAgeMs(summary.GeneratedAt);
+                summary.Stale = summary.AgeMs > 5L * 60L * 1000L;
+
+                foreach (var item in AsList(Get(payload, "events")).Cast<object>().Take(4))
+                {
+                    var row = AsDict(item);
+                    var kind = Convert.ToString(Get(row, "kind") ?? "-");
+                    var eventSummary = Convert.ToString(Get(row, "summary") ?? "");
+                    var at = Convert.ToString(Get(row, "at") ?? "");
+                    var ageMs = ToLong(Get(row, "ageMs"));
+                    var eventAge = ageMs >= 0 ? Age(ageMs) + "前" : (string.IsNullOrWhiteSpace(at) ? "-" : at);
+                    summary.Lines.Add(ReliabilityKindLabel(kind) + " · " + Trim(eventSummary, 88) + " · " + eventAge);
+                }
+
+                summary.Available = summary.Status == "ok" || summary.Status == "warn" || summary.Status == "risk" || summary.Status == "error";
+                if (string.IsNullOrWhiteSpace(summary.Summary) && summary.Available)
+                    summary.Summary = summary.Status == "ok" ? "最近未发现静默失败信号" : "observer 记录到可靠性事件";
+                return summary;
+            }
+            catch (Exception ex)
+            {
+                summary.Error = ex.Message;
+                return summary;
+            }
+        }
+
+        string ReliabilityStatusLabel(string status)
+        {
+            switch ((status ?? "").Trim().ToLowerInvariant())
+            {
+                case "risk": return "高风险";
+                case "warn": return "需观察";
+                case "error": return "读取异常";
+                case "ok": return "正常";
+                default: return "未知";
+            }
+        }
+
+        string ReliabilityKindLabel(string kind)
+        {
+            switch ((kind ?? "").Trim().ToLowerInvariant())
+            {
+                case "model_overloaded": return "模型过载";
+                case "telegram_delivery_failed": return "Telegram 回传失败";
+                case "telegram_processing_failed": return "Telegram 处理失败";
+                case "telegram_action_failed": return "Telegram 动作失败";
+                case "network_or_provider_failure": return "网络/供应商失败";
+                case "gateway_shutdown_timeout": return "Gateway 停机超时";
+                case "gateway_startup_failed": return "Gateway 启动失败";
+                case "gateway_lifecycle_signal": return "Gateway 生命周期";
+                case "session_lock": return "Session 锁";
+                case "context_overflow": return "上下文溢出";
+                default: return Trim(kind, 28);
             }
         }
 
