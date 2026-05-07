@@ -368,7 +368,7 @@ $startup = [Environment]::GetFolderPath('Startup')
 $vbs = Join-Path $startup 'OpenClaw WSL Keepalive.vbs'
 @'
 Set shell = CreateObject("WScript.Shell")
-shell.Run "wsl.exe -d Ubuntu -- bash -lc ""systemctl --user restart openclaw-gateway.service; exec sleep infinity""", 0, False
+shell.Run "wsl.exe -d Ubuntu -- bash -lc ""if pgrep -af '^openclaw-keepalive-anchor( |$)' >/dev/null; then systemctl --user start openclaw-gateway.service; exit 0; fi; systemctl --user start openclaw-gateway.service; exec -a openclaw-keepalive-anchor sleep infinity""", 0, False
 '@ | Set-Content -LiteralPath $vbs -Encoding ASCII
 ```
 
@@ -379,7 +379,7 @@ If an old visible Startup-folder entry exists at `OpenClaw WSL Keepalive.cmd`, r
 For immediate current-session repair, prefer a hidden process:
 
 ```powershell
-Start-Process -WindowStyle Hidden -FilePath 'wsl.exe' -ArgumentList @('-d','Ubuntu','--','bash','-lc','systemctl --user restart openclaw-gateway.service; exec sleep infinity')
+Start-Process -WindowStyle Hidden -FilePath 'wsl.exe' -ArgumentList @('-d','Ubuntu','--','bash','-lc','if pgrep -af "^openclaw-keepalive-anchor( |$)" >/dev/null; then systemctl --user start openclaw-gateway.service; exit 0; fi; systemctl --user start openclaw-gateway.service; exec -a openclaw-keepalive-anchor sleep infinity')
 ```
 
 ### Window Behavior
@@ -394,8 +394,8 @@ Start-Process -WindowStyle Hidden -FilePath 'wsl.exe' -ArgumentList @('-d','Ubun
 
 The keepalive should be safe to create or verify repeatedly:
 
-- Restart the gateway service once at launch.
-- Keep a harmless long-lived process alive, such as `sleep infinity`.
+- Use `systemctl --user start openclaw-gateway.service`, not `restart`, so repeated keepalive launches do not interrupt an already-running gateway.
+- Keep exactly one harmless long-lived anchor process alive, such as `exec -a openclaw-keepalive-anchor sleep infinity`.
 - Avoid printing secrets.
 - Prefer Scheduled Task settings or a single Startup entry to avoid duplicate launches.
 - Before creating another Startup entry, check whether an OpenClaw/WSL keepalive entry already exists in the user Startup folder.

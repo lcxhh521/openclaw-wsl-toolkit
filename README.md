@@ -550,6 +550,7 @@ openclaw-doubao-asr --mode standard --url "https://example.com/audio.wav" --wait
 - 不要为了让 Telegram 跑通而放宽文件系统边界或执行策略。
 - 不要默认开启模型 fallback，除非用户明确选择。
 - keepalive 是基础设施，应该安静可靠地存在，但不要留下不必要的可见命令行窗口。
+- keepalive 只能负责保活和 `systemctl --user start openclaw-gateway.service`，不要用 `restart`。重复触发 keepalive 不应该打断已经运行的 gateway。
 - network recovery watchdog 是断网恢复观测基础设施，只应记录状态和恢复建议，不应自动重启 gateway；它必须带防抖、冷却和 gateway 启动宽限期，不应因为一次短暂探测失败或启动期间依赖补装制造重启链路，也不应提交本机日志或机器专属状态文件。
 
 ## 发布前检查

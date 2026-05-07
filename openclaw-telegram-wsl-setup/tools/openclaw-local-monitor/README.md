@@ -36,6 +36,17 @@ It also creates desktop and Start Menu shortcuts for:
 
 The installer removes old separate `OpenClaw Monitor`, `OpenClaw 启动`, and other old `OpenClaw*.lnk` shortcuts in the same shortcut folders, because the control center is now the only main entry.
 
+## WSL Keepalive
+
+Use `Install-WslKeepalive.ps1` when Windows needs a hidden Startup-folder anchor to keep the Ubuntu WSL session alive after login.
+
+The keepalive entry is intentionally non-disruptive:
+
+- It uses `systemctl --user start openclaw-gateway.service`, not `restart`, so repeated launches do not interrupt an already-running gateway.
+- It keeps one marker process alive as `openclaw-keepalive-anchor`.
+- It checks for an existing anchor before creating another one.
+- It does not edit OpenClaw config, tokens, provider keys, channel settings, or gateway drop-ins.
+
 ## Native Browser Control
 
 The local panel has a `原生 Control` button. Use it only when you need the original browser-based OpenClaw Control UI. The helper script `Start-OpenClaw.ps1` is kept as an internal launcher for that button, not as a separate desktop entry.
