@@ -26,7 +26,7 @@ def main() -> int:
     ap.add_argument("--title", default="translation-task")
     ap.add_argument("--request-file", required=True, help="File containing Alex's original request verbatim")
     ap.add_argument("--source", action="append", default=[], help="Source path/identifier; repeatable")
-    ap.add_argument("--output-root", default="/home/lcxhh/.openclaw/workspace/translation-runs")
+    ap.add_argument("--output-root", default=str(Path.home() / ".openclaw" / "workspace" / "translation-runs"))
     args = ap.parse_args()
 
     request_path = Path(args.request_file).expanduser().resolve()

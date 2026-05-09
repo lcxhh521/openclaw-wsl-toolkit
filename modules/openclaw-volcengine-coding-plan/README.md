@@ -56,14 +56,17 @@ The module registers these model references:
 
 ```text
 volcengine-plan/ark-code-latest
-volcengine-plan/doubao-seed-code
-volcengine-plan/glm-4.7
-volcengine-plan/deepseek-v3.2
 volcengine-plan/doubao-seed-2.0-code
 volcengine-plan/doubao-seed-2.0-pro
 volcengine-plan/doubao-seed-2.0-lite
+volcengine-plan/doubao-seed-code
+volcengine-plan/glm-5.1
+volcengine-plan/minimax-m2.7
+volcengine-plan/kimi-k2.6
 volcengine-plan/minimax-m2.5
 volcengine-plan/kimi-k2.5
+volcengine-plan/glm-4.7
+volcengine-plan/deepseek-v3.2
 ```
 
 Keep `ark-code-latest` as the default when you want the Ark console to control

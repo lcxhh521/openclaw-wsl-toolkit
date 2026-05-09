@@ -46,17 +46,40 @@ __pycache__/
 *.exe
 
 # Local/private workspace material; keep public code under modules/ and openclaw-telegram-wsl-setup/
+/coding-runs/
 /incoming_docs/
 /invest/
 /market-immersion-module/
 /market-immersion/
 /mx_data/
+/people-daily-deep-read/
 /people-daily-deep-read-preview/
 /people-daily-policy-reading-zhihu.md
 /people-daily-test-manifest.json
 /scripts/
 /skills/
+/tasks/
+/tmp/
+/tools/
+/translation-runs/
 /wechat-monitor/
+
+# Local one-off analysis notes and generated QA artifacts
+/DREAMS.md
+/TRANSLATION_AGENT_ISOLATION_PROTOCOL.md
+/analyze_chinese_only.py
+/analyze_properly.py
+/chinese_defects_*.txt
+/coding-agent-task-contract.md
+/defects_table_*.md
+/detailed_defects_*.txt
+/english_residue_details_*.txt
+/extract_range.py
+/find_mixed_english.py
+/people-daily-reading-methodology-v*.md
+/polish_patch_lines_*.md
+/polish_patch_lines_*.py
+/potential_defects_*.txt
 
 # Editor and OS files
 .vscode/

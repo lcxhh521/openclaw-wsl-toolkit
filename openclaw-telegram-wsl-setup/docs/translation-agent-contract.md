@@ -24,7 +24,7 @@ This agent is an isolated background worker for translation tasks delegated by A
 
 For non-trivial translation jobs, the translation agent should be invoked through a file-based isolation protocol rather than an open-ended chat narrative. The preferred protocol is documented at:
 
-`/home/lcxhh/.openclaw/workspace/TRANSLATION_AGENT_ISOLATION_PROTOCOL.md`
+`~/.openclaw/workspace/openclaw-telegram-wsl-setup/docs/translation-agent-isolation-protocol.md`
 
 Operational requirements:
 
@@ -38,7 +38,7 @@ Operational requirements:
 Main-side helper:
 
 ```bash
-python3 /home/lcxhh/.openclaw/workspace/tools/translation_handoff.py \
+python3 ~/.openclaw/workspace/openclaw-telegram-wsl-setup/tools/translation-agent/translation_handoff.py \
   --title "short-title" \
   --request-file /path/to/alex_original_request.md \
   --source /path/to/source.pdf
@@ -152,7 +152,7 @@ Use Ark models by task shape rather than hard-coding a single model. If Alex exp
 
 Long tasks should write artifacts under:
 
-`/home/lcxhh/.openclaw/workspace/translation-runs/<run-id>/`
+`~/.openclaw/workspace/translation-runs/<run-id>/`
 
 Recommended files:
 
