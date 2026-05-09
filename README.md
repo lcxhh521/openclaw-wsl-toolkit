@@ -450,6 +450,24 @@ systemctl --user enable --now openclaw-source-interface-verification.timer
 
 `openclaw-market-feed-snapshot.timer` 是接口失效且暂无可用备用接口时的临时兜底快照，不默认启用；正常情况下依赖主源优先、已验证备用接口临时 failover、主源恢复后自动 failback。
 
+## Translation agent 契约与隔离
+
+仓库现在同步了 translation agent 的公开契约与主从隔离协议：
+
+```text
+openclaw-telegram-wsl-setup/docs/translation-agent-contract.md
+openclaw-telegram-wsl-setup/docs/translation-agent-isolation-protocol.md
+openclaw-telegram-wsl-setup/tools/translation-agent/
+```
+
+核心边界：main/Telegram 是指挥、监督和验收层；translation agent 是隔离执行层。非小型翻译任务应通过 file-based handoff 运行：保留 Alex 原始请求，生成 `handoff_brief.md`、`task_ledger.json` 和 `acceptance_plan.json`，translation agent 只回小型 JSON envelope，main 再独立验收 artifact。
+
+整书/长文翻译固定要求包括：按章节/自然边界拆分，worker 只写文件并回 `DONE <artifact_file> <byte_count>`，artifact gate 通过前不接受完成状态；先 coverage audit/repair，再 audited content freeze，再排版/PDF，最后做覆盖、页数/词数、字体、表格、乱码、空白页和双语节奏验证。
+
+排版方案也已固化：整书双语 PDF 不直接套 raw Markdown/CSS，必须先构建 normalized IR；默认采用干净书籍式排版，英文段落在上、中文段落在下；不用卡片底纹、重边框、左侧竖线或低对比英文；每个新章节另起一页，但不对每个小节/段落滥用分页；复杂 OCR 表格默认用等宽 `pre` 保留，不假装成错列 HTML table。
+
+重要排版决策应在 translation/layout workflow 内部完成：GLM 和 MiniMax 分别产出详细方案，互相阅读、批判、说明哪些保留/改进；GPT 可以参与讨论，但必须由 translation agent/layout workflow 调用并写入 artifact，不能由 main 主脑直接调用 GPT 并综合方案。
+
 ## IMA 知识库接入
 
 OpenClaw 可以通过官方 `ima-skills` 调用腾讯 ima 知识库。这个仓库的 skill 加入了一套 IMA OpenAPI 配置流程，适合这些场景：
