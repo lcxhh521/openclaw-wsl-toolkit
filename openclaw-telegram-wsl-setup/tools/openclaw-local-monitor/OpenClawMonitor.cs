@@ -1304,7 +1304,7 @@ namespace OpenClawLocalMonitor
                 var lastLog = GetValue(values, "last_log");
 
                 var isInstalled = installed == "yes";
-                d.NetworkStability.Add(new DiagnosticItem("Netwatch installed", isInstalled ? "yes" : "no", isInstalled ? "Good" : "Warn", isInstalled ? "控制中心可见；后台执行层已安装" : "尚未安装网络稳定性 watchdog；可通过 openclaw-netwatch 安装", "systemd/user files"));
+                d.NetworkStability.Add(new DiagnosticItem("Network Observer / Netwatch installed", isInstalled ? "yes" : "no", isInstalled ? "Good" : "Warn", isInstalled ? "控制中心可见；后台观察层已安装" : "尚未安装网络观察器；可通过 openclaw-netwatch 安装", "systemd/user files"));
 
                 if (!isInstalled) return;
 
@@ -1331,11 +1331,11 @@ namespace OpenClawLocalMonitor
 
                 if (!string.IsNullOrWhiteSpace(lastLog))
                 {
-                    d.NetworkStability.Add(new DiagnosticItem("Last netwatch log", Trim(RedactSensitive(lastLog), 180), "Good", "最近 watchdog 事件", "~/.cache/openclaw-netwatch/watchdog.log"));
+                    d.NetworkStability.Add(new DiagnosticItem("Last Netwatch log", Trim(RedactSensitive(lastLog), 180), "Good", "最近网络观察事件", "~/.cache/openclaw-netwatch/watchdog.log"));
                 }
                 else
                 {
-                    d.NetworkStability.Add(new DiagnosticItem("Last netwatch log", "无记录", "Good", "尚无 watchdog 日志", "~/.cache/openclaw-netwatch/watchdog.log"));
+                    d.NetworkStability.Add(new DiagnosticItem("Last Netwatch log", "无记录", "Good", "尚无 Netwatch 日志", "~/.cache/openclaw-netwatch/watchdog.log"));
                 }
             }
             catch (Exception ex)
@@ -3050,7 +3050,7 @@ namespace OpenClawLocalMonitor
                 "emit_service() { name=\"$1\"; unit=\"$2\"; systemctl --user cat \"$unit\" >/dev/null 2>&1 || return; active=$(systemctl --user is-active \"$unit\" 2>/dev/null || true); sub=$(systemctl --user show \"$unit\" -p SubState --value 2>/dev/null | head -1); pid=$(systemctl --user show \"$unit\" -p MainPID --value 2>/dev/null | head -1); since=$(systemctl --user show \"$unit\" -p ActiveEnterTimestamp --value 2>/dev/null | head -1); since_s=$(date -d \"$since\" +%s 2>/dev/null || echo 0); now_s=$(date +%s); age_s=0; [ \"$since_s\" -gt 0 ] 2>/dev/null && age_s=$((now_s-since_s)); last=$(journalctl --user -u \"$unit\" -n 1 --no-pager -o short-iso 2>/dev/null | cut -c1-180); case \"$active\" in active|activating|deactivating|failed) printf 'SERVICE\\t%s\\t%s/%s\\t%s\\t%s\\t%s\\t%s\\n' \"$name\" \"$active\" \"$sub\" \"$unit\" \"$pid\" \"$age_s\" \"$last\";; esac; }\n" +
                 "pidfile=\"memory/continuous-task-status/steinsgate-kurisu.pid\"; [ -f \"$pidfile\" ] && emit_pid \"\u5b66\u4e60 daemon\" \"$(tr -dc '0-9' < \"$pidfile\" 2>/dev/null)\"\n" +
                 "ps -eo pid=,etime=,pcpu=,stat=,args= | grep -E 'continuous_learning_daemon\\.py|steinsgate_visible_supervisor\\.py|market_immersion\\.py|run_market_immersion\\.sh|people_daily_workflow\\.py|run_people_daily_deep_read\\.sh|market_feed_snapshot\\.py|openclaw-message|rapidocr|paddleocr|tesseract' | grep -v -E 'grep -E|OpenClawMonitor|systemctl --user|journalctl --user|ps -eo pid=' | while read -r pid etime cpu stat args; do role=$(role_for_args \"$args\"); emit_proc \"$role\" \"$pid\" \"$etime\" \"$cpu\" \"$stat\" \"$args\"; done\n" +
-                "emit_service \"OpenClaw \u7f51\u7edc watchdog\" openclaw-netwatch.service\n" +
+                "emit_service \"OpenClaw Network Observer / Netwatch\" openclaw-netwatch.service\n" +
                 "emit_service \"\u6bcf\u65e5\u5feb\u8baf morning\" openclaw-market-immersion-morning.service\n" +
                 "emit_service \"\u6bcf\u65e5\u5feb\u8baf midday\" openclaw-market-immersion-midday.service\n" +
                 "emit_service \"\u6bcf\u65e5\u5feb\u8baf close\" openclaw-market-immersion-close.service\n" +

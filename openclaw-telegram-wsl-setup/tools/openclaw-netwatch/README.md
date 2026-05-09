@@ -1,12 +1,12 @@
-# OpenClaw Netwatch
+# OpenClaw Network Observer / Netwatch
 
-OpenClaw Netwatch is a small WSL user timer for network recovery. It exists because a long-running Telegram gateway can stay alive while network sockets, Telegram polling, provider connections, or local gateway HTTP become stale after network/proxy changes.
+OpenClaw Network Observer, implemented as `openclaw-netwatch`, is a small WSL user timer for observing network and gateway recovery signals. It exists because a long-running Telegram gateway can stay alive while network sockets, Telegram polling, provider connections, or local gateway HTTP become stale after network/proxy changes.
 
-It keeps network observation in the background while surfacing the result through the local Control Center, instead of making the user repeatedly poke terminals.
+It keeps network observation in the background while surfacing the result through the local Control Center, instead of making the user repeatedly poke terminals. The name intentionally avoids implying automatic repair: this component observes and records recovery recommendations only.
 
 ## Mode
 
-OpenClaw Netwatch is observe-only. It records network/gateway state and writes recovery recommendations to its log. It never restarts `openclaw-gateway.service`.
+OpenClaw Network Observer / Netwatch is observe-only. It records network/gateway state and writes recovery recommendations to its log. It never restarts `openclaw-gateway.service`.
 
 It records recovery recommendations for:
 

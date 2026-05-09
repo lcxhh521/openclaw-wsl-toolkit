@@ -65,7 +65,7 @@ Write-Host ""
 
 if (-not $Apply) {
     Write-Host "Dry run only. Re-run with -Apply to install."
-    Write-Host "This watchdog only observes and records recovery recommendations; it never restarts gateway."
+    Write-Host "OpenClaw Network Observer / Netwatch only observes and records recovery recommendations; it never restarts gateway."
     exit 0
 }
 

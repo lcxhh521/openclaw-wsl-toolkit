@@ -1,5 +1,5 @@
 [Unit]
-Description=Run OpenClaw network recovery watchdog
+Description=Run OpenClaw Network Observer / Netwatch
 
 [Timer]
 OnBootSec=90

@@ -1,5 +1,5 @@
 [Unit]
-Description=OpenClaw network recovery watchdog
+Description=OpenClaw Network Observer / Netwatch
 After=network-online.target
 
 [Service]

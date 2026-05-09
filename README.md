@@ -44,7 +44,7 @@ Windows
   -> 权限范围确认
   -> 模型选择与本地回复验证
   -> Windows 登录后的 keepalive/autostart
-  -> 长时间断网后的 network recovery watchdog
+  -> 长时间断网后的 OpenClaw Network Observer / Netwatch（observe-only）
   -> 本机 OpenClaw 控制中心
   -> Telegram Bot
 ```
@@ -621,7 +621,7 @@ openclaw-doubao-asr --mode standard --url "https://example.com/audio.wav" --wait
 - 不要默认开启模型 fallback，除非用户明确选择。
 - keepalive 是基础设施，应该安静可靠地存在，但不要留下不必要的可见命令行窗口。
 - keepalive 只能负责保活和 `systemctl --user start openclaw-gateway.service`，不要用 `restart`。重复触发 keepalive 不应该打断已经运行的 gateway。
-- network recovery watchdog 是断网恢复观测基础设施，只应记录状态和恢复建议，不应自动重启 gateway；它必须带防抖、冷却和 gateway 启动宽限期，不应因为一次短暂探测失败或启动期间依赖补装制造重启链路，也不应提交本机日志或机器专属状态文件。
+- OpenClaw Network Observer / Netwatch 是网络与 gateway 恢复信号观测基础设施，只应记录状态和恢复建议，不应自动重启 gateway；它必须带防抖、冷却和 gateway 启动宽限期，不应因为一次短暂探测失败或启动期间依赖补装制造重启链路，也不应提交本机日志或机器专属状态文件。
 
 ## 发布前检查
 
@@ -654,7 +654,7 @@ git grep -n -I -E 'gho_|github_pat_|telegram:[0-9]+|NOTION_TOKEN=|BOT_TOKEN=' ||
 
 1. **Ubuntu on WSL2 是推荐默认路径。**
 2. **keepalive/autostart 是 OpenClaw Telegram 稳定运行的基础设施。**
-3. **长时间断网恢复要作为基础设施处理，避免网络恢复后 stale socket / polling stall 影响行动；watchdog 必须防抖并尊重 gateway 启动宽限期，避免误重启造成 Telegram 延迟。**
+3. **长时间断网恢复要作为基础设施处理，避免网络恢复后 stale socket / polling stall 影响行动；Network Observer / Netwatch 必须保持 observe-only、防抖并尊重 gateway 启动宽限期，避免误重启造成 Telegram 延迟。**
 4. **接入 Telegram 前要先确认 OpenClaw 本地模型可以正常回复。**
 5. **OpenClaw 的可见范围和权限范围必须由用户确认，且可以用自然语言表达。**
 

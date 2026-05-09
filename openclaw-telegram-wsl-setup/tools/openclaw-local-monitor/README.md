@@ -81,7 +81,7 @@ Diagnostics v0 shows seven sections:
 
 - Gateway: reachability, runtime/admin capability, PID/resource snapshot, stability notes.
 - Gateway Resilience: current gateway PID/start time/CPU/RSS, a restart timeline from recent stability files, and `openclaw-tasks` residual process detection through `ps` only.
-- Network Stability: OpenClaw Netwatch install/timer/mode/state/log visibility. The monitor displays the watchdog state from inside Control Center, but the watchdog itself runs as a WSL user timer so auto-refresh does not compete with Telegram or the gateway event loop.
+- Network Stability: OpenClaw Network Observer / Netwatch install/timer/mode/state/log visibility. The monitor displays the observer state from inside Control Center, but Netwatch itself runs as a WSL user timer so auto-refresh does not compete with Telegram or the gateway event loop.
 - Entrance Pressure: recent gateway-journal signals that explain why Telegram can be online but slow, including event-loop warnings, `memory-core`/dreaming timeouts, session locks, cleanup timeouts, provider fetch failures, and recent Telegram delivery success/failure. This uses `journalctl` keyword filtering only; it does not call OpenClaw `logs.tail`.
 - Telegram: channel status, `telegram:default` binding, current Telegram session key, token threshold state.
 - Sessions: 24h active sessions, main/telegram distribution, high-token sessions, legacy main Telegram session hints.
@@ -91,7 +91,7 @@ Each diagnostics source has its own timeout. If one section fails, the dialog sh
 
 Gateway Resilience is a safe observation path. It must not call `openclaw tasks audit`, `openclaw tasks show`, `maintenance --apply`, restart/stop/start gateway, cleanup sessions, cancel/delete tasks, patch config, or modify agent/model/binding/secrets/session state. Residual `openclaw-tasks` rows are displayed only; the monitor never kills them automatically. Stability files are treated as evidence: the monitor summarizes the latest restart/shutdown evidence in a `Restart timeline` row and keeps the recent evidence list visible. If a serious stability event belongs to a previous gateway PID and the current gateway process is running under a new PID, the event is treated as recovered-but-observable rather than an active failure. If task audit is needed, it should be a separate, explicitly confirmed maintenance action, not part of the control center refresh loop.
 
-Network Stability belongs in Control Center as visibility and explicit user control. The `openclaw-netwatch` script/timer is only the execution layer. Diagnostics reads whether it is installed, active, in observe-only mode, and what it last recorded. The main auto-refresh path does not run network watchdog logic, and diagnostics does not install, enable, disable, or restart the watchdog. Netwatch never restarts gateway automatically; it only records recovery recommendations.
+Network Stability belongs in Control Center as visibility and explicit user control. The `openclaw-netwatch` script/timer is only the execution layer for OpenClaw Network Observer / Netwatch. Diagnostics reads whether it is installed, active, in observe-only mode, and what it last recorded. The main auto-refresh path does not run network recovery logic, and diagnostics does not install, enable, disable, or restart Netwatch. Netwatch never restarts gateway automatically; it only records recovery recommendations.
 
 ## Clash Safe Mode
 

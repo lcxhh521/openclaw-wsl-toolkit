@@ -8,7 +8,7 @@ set -u
 #
 # This is observe-only by design. Gateway recovery should happen through an
 # explicit user action or OpenClaw source-level reliability logic, not through
-# a WSL watchdog silently restarting the service.
+# an observe-only WSL network observer silently restarting the service.
 
 STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/openclaw-netwatch"
 STATE_FILE="$STATE_DIR/state"

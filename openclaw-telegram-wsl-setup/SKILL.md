@@ -677,14 +677,14 @@ stale-socket
 channel stop timed out
 ```
 
-If these appear after a long offline period and `openclaw status` still shows the gateway service as running, add or verify a network-recovery watchdog. Treat the watchdog as debounce infrastructure: a single failed probe or a slow gateway probe should not immediately restart OpenClaw, because that can amplify a short network/proxy wobble into delayed Telegram replies. The preferred behavior is:
+If these appear after a long offline period and `openclaw status` still shows the gateway service as running, add or verify OpenClaw Network Observer / Netwatch. Treat Netwatch as observe-only debounce infrastructure: a single failed probe or a slow gateway probe should not immediately restart OpenClaw, because that can amplify a short network/proxy wobble into delayed Telegram replies. The preferred behavior is:
 
 1. Check network reachability on a short interval.
 2. Require at least two consecutive network probe failures before recording `offline`.
 3. While offline, only record `offline`; do not repeatedly restart OpenClaw.
 4. When state changes from confirmed `offline` to `online`, record a recovery recommendation instead of restarting gateway.
 5. Use a cooldown so repeated recommendations do not spam logs or encourage restart loops.
-6. While online, optionally check local gateway health with a simple HTTP request to the dashboard endpoint, but never during the gateway startup grace period. Do not use `openclaw gateway probe` inside the systemd watchdog; it can fail under a different user-service environment and create false restarts. Use `openclaw gateway probe` only as an interactive verification command outside the timer.
+6. While online, optionally check local gateway health with a simple HTTP request to the dashboard endpoint, but never during the gateway startup grace period. Do not use `openclaw gateway probe` inside the Netwatch timer; it can fail under a different user-service environment and create false restart recommendations. Use `openclaw gateway probe` only as an interactive verification command outside the timer.
 
 Recommended user-level systemd design:
 
@@ -709,7 +709,7 @@ tools/openclaw-netwatch/
 
 Run the installer without `-Apply` first for a dry run. Applied installs are observe-only: the timer records network/gateway recovery recommendations, but it never restarts gateway automatically.
 
-Use the bundled implementation as the source of truth. Do not recreate an older watchdog that calls `systemctl --user restart openclaw-gateway.service` automatically.
+Use the bundled implementation as the source of truth. Do not recreate any older auto-recovery loop that calls `systemctl --user restart openclaw-gateway.service` automatically.
 
 After installing the timer, verify:
 
@@ -726,8 +726,8 @@ Expected result after initialization:
 
 - The first run records current network/gateway state.
 - One failed network or gateway probe should log "waiting for confirmation" and should not restart the gateway.
-- During the gateway startup grace period, the watchdog should not record gateway HTTP recovery recommendations. This prevents false alarms while OpenClaw installs bundled runtime deps or starts Telegram sidecars.
-- If gateway appears slow from Telegram but `openclaw gateway probe` is fast interactively, inspect watchdog logs first; do not restart from the watchdog path.
+- During the gateway startup grace period, Netwatch should not record gateway HTTP recovery recommendations. This prevents false alarms while OpenClaw installs bundled runtime deps or starts Telegram sidecars.
+- If gateway appears slow from Telegram but `openclaw gateway probe` is fast interactively, inspect Netwatch logs first; do not restart from the Netwatch path.
 - `openclaw status` should return `gateway.reachable=true` after startup settles.
 
 If a user's outage pattern is Windows network interface up/down rather than proxy reachability, prefer surfacing that state in Control Center diagnostics before adding any repair action. Do not add a Windows Task Scheduler reconnect restart by default.
