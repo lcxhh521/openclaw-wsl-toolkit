@@ -1311,6 +1311,18 @@ If the user wants a clean Telegram-only channel setup:
 
 Never delete unrelated model, proxy, filesystem boundary, auth, memory, gateway, or execution-policy configuration while cleaning chat channels.
 
+## GitHub Sync / Publish Hard Rule
+
+When aligning the public GitHub project with local progress, treat this skill and every shipped file as one system, not as isolated patches. Before any public push, inspect and update the whole published surface together: `README.md`, this `SKILL.md`, optional module docs, program entry points, helper tools, systemd/timer units, config templates, install steps, verification steps, and safety/privacy boundaries.
+
+Hard requirements:
+
+1. Code behavior, install instructions, timers, default enablement, optional modules, delivery semantics, and safety rules must agree across README, SKILL, program files, config templates, and systemd/timer files.
+2. If local behavior changed, update the corresponding public documentation and templates in the same sync; do not push code-only changes that leave stale README/SKILL guidance.
+3. If documentation promises a capability, verify that the program/config actually implements it; otherwise either implement it or narrow the documentation before pushing.
+4. Keep local-only material local: secrets, account IDs, Notion/Telegram targets, private API details, logs, generated reports, runtime state, and machine-specific paths must not be published.
+5. The push summary should state which layers were aligned: skill, README, program, config template, systemd/timer, helper tools, and validation. Any intentionally unsynced layer must be named as local-only or follow-up.
+
 ## Safety Defaults
 
 - Use local terminal prompts for tokens.
