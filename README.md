@@ -63,7 +63,7 @@ Windows
 
 现在的控制中心默认走轻量路线：主面板只看生命体征，不再周期性展开 `sessions.list`、`models.list`、`logs.tail`、`tasks audit/show` 这类容易挤占 gateway 的重查询。Token/成本卡片来自离线缓存 `~/.openclaw/monitor-cache/usage-summary.json`，由可选 WSL timer 约每 10 分钟扫描本地 session 文件生成；Token 卡片显示今日流量，成本卡片显示当前自然月累计估算，月初自然归零；浏览器版 Control 保留为 `原生 Control` 高级入口，打开前会提示，因为它可能触发较重的会话/模型查询。
 
-第四块是市场信息浸泡模块。它是一个可选 `openclaw-job-module`，现在包含两条工作流：一条是 7x24 财经快讯的每日快讯简报，一条是《人民日报》电子版/PDF 的长文本深读。前者按时间段抓取财经快讯流，去重后交给 OpenClaw 写成 Notion 简报；后者按天抓取《人民日报》全部版面、PDF 和文章页，并在 Notion 的日期页下生成版面归档和文章深读子页。这个模块不是基础安装必需项，只有用户明确要市场日报、信息浸泡、人民日报深读或 Notion 闭环时才安装。
+第四块是市场信息浸泡模块。它是一个可选 `openclaw-job-module`，现在包含两条工作流：一条是 7x24 财经快讯的每日快讯简报，一条是《人民日报》电子版/PDF 的要闻版深读。前者按时间段抓取财经快讯流，去重后交给 OpenClaw 写成 Notion 简报；后者按天抓取《人民日报》电子版、PDF 和文章页，只保留要闻版面，在 Notion 日期父页生成全日总览、文章整篇深读，并在文章子页生成结构化原文与解析。这个模块不是基础安装必需项，只有用户明确要市场日报、信息浸泡、人民日报深读或 Notion 闭环时才安装。
 
 第五块是 IMA 知识库接入。它记录了如何给 OpenClaw 安装官方 `ima-skills`，用 IMA OpenAPI 读取和搜索腾讯 ima 知识库、添加网页/微信文章、上传文件、管理笔记，并通过自然语言触发这些能力。
 
@@ -275,12 +275,13 @@ modules/openclaw-market-immersion/
 - 财联社电报
 - 金十数据快讯
 - 新浪财经 7x24
+- 同花顺实时快讯
 - 华尔街见闻 7x24
 
 日报归档保留本地 Markdown 和 manifest。页面主体不再拆成固定 8 个栏目，而是：
 
 ```text
-1. 信息汇总：3-5 个自然段，合并同主题消息，保留具体主体、数字和事件细节。
+1. 信息汇总：默认 4-6 个自然段，合并同主题消息，保留具体主体、数字和事件细节。
 2. 原始消息流：按时间顺序展示标题、正文、时间与来源。
 3. 本地 manifest / 调试归档：供排查和复盘。
 ```
@@ -304,27 +305,30 @@ systemctl --user list-timers "openclaw-market-immersion*" --all
 journalctl --user -u openclaw-market-immersion-morning.service -n 100 --no-pager
 ```
 
-### 高频快照兜底
+### 数据源健康、备用接口与禁止降级发布
 
-模块包含一个 30 分钟一次的 feed snapshot retention layer：
+模块现在把“数据源失效处理”和“禁止自动降级发布”分开写清楚：
 
-```text
-systemd/openclaw-market-feed-snapshot.timer
-scripts/market_feed_snapshot.py
-```
+- `allow_degraded_publication` 默认并应保持为 `false`；缺源、跳过失败源或发布不完整日报都需要用户明确批准。
+- 每次抓取会生成 `source_health`，列出失败/窗口不足的数据源、错误原因、可用备用接口和建议动作。
+- 备用方案不是高频本地快照，而是 本机私有 `config/source_registry.json` 维护的在线接口注册表；公开仓库只保留结构示例，不发布具体备用接口。
+- `scripts/verify_source_interfaces.py` 会低频验证候选接口是否与官方网站展示一致；只有验证通过的候选才可作为 `backup_ready`。
+- `openclaw-source-interface-verification.timer` 默认每月 1 日和 16 日 07:05 CST 运行一次，用于常备验证，不发布日报、不替换主源。
+- 实际日报抓取始终主源优先；主源失败时才临时尝试已验证备用接口，下一轮主源恢复后自动切回主源。
 
-它用于定期保留原始信息流快照，减少部分接口历史窗口太短导致的日报缺口。它不是替代正式日报，而是补充原始数据保留层。
+`openclaw-market-feed-snapshot.timer` 不作为默认方案启用；只有在主要接口失效且暂时找不到替代接口时，才可临时开启快照兜底。具体设计见 `modules/openclaw-market-immersion/docs/source_interface_failover.md`。
 
 ### 人民日报深读
 
-人民日报深读是独立于快讯日报的长文本子流程，但封装在同一个模块里。它复刻手工整理 Notion 的流程：
+人民日报深读是独立于快讯日报的长文本子流程，但封装在同一个模块里。当前流程按“要闻版深读”而不是“全报归档”设计：
 
-1. 抓取当天版面的电子版、PDF 和文章正文。
-2. 在 Notion 的人民日报日期页下生成归档。
-3. 日期页按版面列出文章，每篇文章下面创建深读子页。
-4. 前 4 版文章默认生成逐段解读和全文深度解读。
-5. 版务、责编、版式设计等非正文条目自动过滤。
-6. 用 `people_daily_publications.json` 记录已发布日期，避免重复创建。
+1. 抓取当天电子版、PDF 和文章正文，但只保留版面标签为“要闻”的页面与正文文章。
+2. 在 Notion 的人民日报日期页下生成父页：全日总览、要闻版 PDF、按版面展开的文章列表。
+3. 父页承载每篇文章的“整篇深度解读”，不放长篇逐段原文。
+4. 每篇保留文章创建子页，子页承载“结构化原文与解析”：按意义单元分组，不机械逐自然段。
+5. 单篇文章分析概念上仍是两个源 prompt：`article_full_analysis_v1.md` 和 `article_structured_groups_v1.md`；生产上可以由脚本动态合并为一次模型调用，返回 `full_analysis + structured_groups`。
+6. 脚本质量门只做结构性硬校验：JSON/prompt_id、`full_analysis` 非空、`structured_groups` 覆盖全部输入段落、`paragraph_indices` 合法；风格和内容质量留在 prompt 自检与人工复核。
+7. 版务、责编、版式设计等非正文条目自动过滤；用 `people_daily_publications.json` 记录已发布日期，避免重复创建。
 
 入口脚本：
 
@@ -348,46 +352,71 @@ scripts/market_feed_snapshot.py
 ~/.openclaw/workspace/people-daily-deep-read/YYYY-MM-DD/
 ```
 
-包含 `manifest.json`、PDF 原件、Markdown 归档，以及本地 HTML 对照页。正式发布时会调用 OpenClaw 为每篇深读文章生成逐段解析，Notion 子页采用“逐段原文 + 对应解析 + 全文深度解读”的结构，便于审计原文和解释之间的关系。
+包含 `manifest.json`、PDF 原件、Markdown 归档、分析缓存，以及本地 HTML 对照页；这些只是内部审计材料。正式发布时会调用 OpenClaw 为每篇保留文章生成 `full_analysis` 和 `structured_groups`：父页展示“整篇深度解读”，子页用 `paragraph_indices` 回填浅色原文并展示结构组解析。若启用 Telegram 完成提醒，只发送 Notion 链接，不发送本地 Markdown、manifest、缓存或输出目录。
 
 ### 配置自己的人民日报深读 prompt
 
-具体解读 prompt 不随仓库发布。仓库内置的只是 JSON 输出契约和最低质量要求；如果启用人民日报深读，建议用户在本机填入自己的私有 prompt。
+具体解读 prompt 不随仓库发布。仓库内置的只是流程、页面结构和结构性 JSON 契约；如果启用人民日报深读，建议用户在本机配置自己的私有 prompt。
 
-1. 在本机创建一个不提交到 GitHub 的 prompt 文件，例如：
+1. 在本机创建不提交到 GitHub 的 prompt 目录，例如：
 
 ```bash
-mkdir -p ~/.openclaw/private-prompts
-nano ~/.openclaw/private-prompts/people_daily_analysis_prompt.md
+mkdir -p ~/.openclaw/private-prompts/people_daily
+nano ~/.openclaw/private-prompts/people_daily/article_full_analysis_v1.md
+nano ~/.openclaw/private-prompts/people_daily/article_structured_groups_v1.md
+nano ~/.openclaw/private-prompts/people_daily/issue_overview_v1.md
 ```
 
-2. prompt 可以写自己的解读方法，但必须要求模型输出下面的 JSON 结构：
+2. 两个文章级源 prompt 分别负责两个任务：
+
+- `article_full_analysis_v1.md`：生成 `full_analysis`。
+- `article_structured_groups_v1.md`：生成 `structured_groups`。
+
+生产上可以设置 `combined_call: true`，由脚本运行时动态读取两个源 prompt 并合并成一次模型调用；不需要维护一个单独的 combined prompt 文件。
+
+3. 合并调用的输出 JSON 结构为：
 
 ```json
 {
-  "paragraph_notes": [
-    {"excerpt": "段首短摘", "analysis": "该段解析"}
-  ],
+  "prompt_id": "people_daily_article_combined_v1_2026-05-06",
+  "full_analysis": ["全文深度解读"],
   "signal_analysis": ["可选：信号/语境分析"],
   "policy_chain": ["可选：政策链路或观察点"],
   "follow_up": ["可选：后续跟踪事项"],
-  "full_analysis": ["全文深度解读"]
+  "structured_groups": [
+    {
+      "title": "结构组标题",
+      "paragraph_indices": [1, 2],
+      "analysis": "这一组为什么要放在一起读"
+    }
+  ]
 }
 ```
 
-其中 `paragraph_notes` 的数量应与原文段落数量一致。
-
-3. 在安装后的本机配置 `config/market_immersion_config.json` 中填写私有 prompt 路径：
+4. 在安装后的本机配置 `config/market_immersion_config.json` 中填写私有 prompt 路径：
 
 ```json
 "people_daily_deep_read": {
   "analysis": {
-    "prompt_template_path": "~/.openclaw/private-prompts/people_daily_analysis_prompt.md"
+    "combined_call": true,
+    "required_prompt_id": "people_daily_article_combined_v1_2026-05-06",
+    "full_analysis": {
+      "prompt_template_path": "~/.openclaw/private-prompts/people_daily/article_full_analysis_v1.md",
+      "required_prompt_id": "people_daily_full_analysis_v1_2026-05-06"
+    },
+    "structured_groups": {
+      "prompt_template_path": "~/.openclaw/private-prompts/people_daily/article_structured_groups_v1.md",
+      "required_prompt_id": "people_daily_structured_groups_v1_2026-05-06"
+    },
+    "overview": {
+      "prompt_template_path": "~/.openclaw/private-prompts/people_daily/issue_overview_v1.md",
+      "required_prompt_id": "people_daily_overview_v1_2026-05-06"
+    }
   }
 }
 ```
 
-4. 确认 prompt 文件没有被放进仓库；如果使用 git 管理自己的配置，请把私有 prompt 路径加入 `.gitignore`。
+5. 确认 prompt 文件没有被放进仓库；如果使用 git 管理自己的配置，请把私有 prompt 路径加入 `.gitignore`。
 
 ### 安装市场模块
 
@@ -413,8 +442,13 @@ systemctl --user enable --now openclaw-market-immersion-morning.timer
 systemctl --user enable --now openclaw-market-immersion-midday.timer
 systemctl --user enable --now openclaw-market-immersion-close.timer
 systemctl --user enable --now openclaw-market-immersion-night.timer
-systemctl --user enable --now openclaw-market-feed-snapshot.timer
+# 如果用户同时选择启用人民日报日更深读，再启用：
+systemctl --user enable --now openclaw-people-daily-deep-read.timer
+# 如果用户选择启用备用接口低频验证，再启用：
+systemctl --user enable --now openclaw-source-interface-verification.timer
 ```
+
+`openclaw-market-feed-snapshot.timer` 是接口失效且暂无可用备用接口时的临时兜底快照，不默认启用；正常情况下依赖主源优先、已验证备用接口临时 failover、主源恢复后自动 failback。
 
 ## IMA 知识库接入
 

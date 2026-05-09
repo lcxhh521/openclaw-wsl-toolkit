@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "policy": {
+    "purpose": "Maintain verified backup interfaces for market brief sources; this is not local snapshot retention.",
+    "backup_ready_rule": "candidate endpoint must fetch successfully and its returned items must be consistent with the official page presentation in a recent verification run",
+    "publish_rule": "backup endpoint may be used only when marked backup_ready; degraded publication still requires explicit operator approval",
+    "failover_policy": "primary_first; use backup_ready candidate only when primary fails current run; automatically return to primary once primary verifies healthy again; backup is not a permanent replacement",
+    "failback_rule": "if primary endpoint succeeds in a later run, clear failover and use primary immediately",
+    "operator_rule": "if no backup_ready candidate exists, block/report rather than publish degraded unless Alex explicitly approves",
+    "public_repo_note": "Concrete source interface URLs, parameters, signatures and field mappings are intentionally not published. Keep the operational registry in the installed local workspace only."
+  },
+  "sources": [
+    {
+      "id": "example_source_family",
+      "name": "Example Market Source Family",
+      "official_url": "https://example.com/official-page",
+      "primary": "local_registry_primary_id",
+      "candidates": [
+        {
+          "id": "local_registry_candidate_id",
+          "kind": "json_endpoint_or_signed_endpoint",
+          "url": "LOCAL_ONLY_NOT_PUBLISHED",
+          "params": "LOCAL_ONLY_NOT_PUBLISHED",
+          "items_path": "LOCAL_ONLY_NOT_PUBLISHED",
+          "fields": "LOCAL_ONLY_NOT_PUBLISHED"
+        }
+      ],
+      "note": "Replace this example with locally verified interfaces in the installed private registry. Do not commit operational endpoints."
+    }
+  ]
+}

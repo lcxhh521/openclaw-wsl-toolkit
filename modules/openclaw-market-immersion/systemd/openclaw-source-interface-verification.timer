@@ -1,0 +1,12 @@
+[Unit]
+Description=Run OpenClaw Market Source Interface Verification twice monthly
+
+[Timer]
+OnBootSec=10min
+OnCalendar=*-*-01,16 07:05:00
+AccuracySec=1h
+Persistent=true
+Unit=openclaw-source-interface-verification.service
+
+[Install]
+WantedBy=timers.target

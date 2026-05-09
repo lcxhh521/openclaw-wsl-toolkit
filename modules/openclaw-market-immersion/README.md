@@ -32,12 +32,28 @@
 7. 如果用户在配置里启用 Telegram，正式阶段会尝试推送日报链接或文件。
 8. 必要的闭环步骤全部成功后才更新 `state.json` 的 `last_success_at`。
 
+## 市场简报写作标准
+
+每日快讯简报服务的是市场洞察，不是财经媒体式新闻摘要。生成流程要先全面吸收阶段性信息流，再过滤噪音，最后输出对市场理解有帮助的「信息汇总」。
+
+核心原则：
+
+- **全面但降噪**：不能只抓最吵的高频新闻；高频重复信息只合并写一次，低频但有订单、审批、政策、监管、价格异动、产业链数据、出海验证的信息要进入候选池。
+- **洞察来自证据**：可以做市场洞察，但判断必须贴着原始信息流里的主体、数字、事件和相互关系，不预测涨跌，不给买卖建议。
+- **阶段边界**：`morning`、`midday`、`close` 只输出阶段性市场洞察，不能凭单一阶段信息流下全天结论；只有 `night` / 综合复盘可以形成全天判断，且必须基于全天信息流证据。
+- **不教条**：覆盖类别只是后台检查工具，不是前台填空模板。没有增量的类别可以不写，低价值信息不能为了“覆盖全面”被硬塞进总览。
+- **段落弹性**：信息汇总默认 4-6 个自然段；如果信息密度确实需要，可以超过预设段落数，但不能靠空话扩段。
+- **前台表达**：正文不展示后台分类，不写“本次窗口/补发/没有混入”等工程口径，也不写“不该写成/后续简报应”等批改口吻。
+
+后台可用的降噪/覆盖检查包括：主线风险或地缘变量、市场价格（股指/油价/黄金/汇率/利率等）、国内政策与产业、公司/订单/审批/出海、海外宏观与贸易、低频高价值信号、重要分歧和反证。它们用于帮助判断遗漏，不是要求每份简报机械填满所有类别。
+
 ## 当前信息源
 
 - 东方财富财经资讯与 7x24 快讯栏目
 - 财联社电报
 - 金十数据快讯
 - 新浪财经 7x24
+- 同花顺实时快讯
 - 华尔街见闻 7x24
 
 ## 运行
@@ -52,22 +68,40 @@
 systemctl --user list-timers "openclaw-market-immersion*" --all
 ```
 
+数据源健康、备用接口与禁止降级发布说明：[`docs/source_interface_failover.md`](docs/source_interface_failover.md)。`openclaw-market-feed-snapshot.timer` 不作为默认方案启用；只有在主要接口失效且暂时找不到替代接口时，才临时开启 30min 快照兜底。
+
+人民日报深读日更流程说明：[`docs/people_daily_deep_read_workflow.md`](docs/people_daily_deep_read_workflow.md)。
+
 查看最近日志：
 
 ```bash
 journalctl --user -u openclaw-market-immersion-morning.service -n 100 --no-pager
 ```
 
+## 数据源健康、备用接口与禁止降级发布
+
+每日快讯简报不应因为个别数据源失败就自动发布降级版。模块当前规则：
+
+- `pipeline.allow_degraded_publication` 默认 `false`；降级发布、跳过失败源或补发不完整版本都需要用户明确批准。
+- 每次抓取会在 manifest 中写入 `source_health`，列出失败/窗口不足的数据源、错误原因、恢复/备用接口建议。
+- 备用接口由安装后的本机私有 `config/source_registry.json` 维护；公开仓库只保留结构示例，不发布具体 URL、参数、签名或字段映射。`scripts/verify_source_interfaces.py` 负责只读验证。
+- `openclaw-source-interface-verification.timer` 默认每月 1 日和 16 日 07:05 CST 运行一次，低频验证候选接口，不发布日报、不替换主源。
+- 日报运行时主源优先；只有主源当前失败时，才使用最近验证为 `backup_ready` 的候选接口；下一轮主源恢复后自动 fail back。
+
+具体设计见 [`docs/source_interface_failover.md`](docs/source_interface_failover.md)。
+
 ## 人民日报深读
 
-人民日报深读是独立于快讯日报的长文本子流程，但封装在同一个模块里。它复刻手工整理 Notion 的流程：
+人民日报深读是独立于快讯日报的长文本子流程，但封装在同一个模块里。当前流程按“要闻版深读”而不是“全报归档”设计：
 
-1. 抓取当天 8 个版面的电子版、PDF 和文章正文。
-2. 在 Notion 的 `财经政经 / 人民日报 / 某年某月某日` 下生成日期页。
-3. 日期页按版面列出文章，每篇文章下面创建深读子页。
-4. 前 4 版文章默认生成逐段解读和全文深度解读。
-5. 版务、责编、版式设计等非正文条目自动过滤。
-6. 用 `people_daily_publications.json` 记录已发布日期，避免重复创建。
+1. 抓取当天电子版、PDF 和文章正文，但只保留版面标签为“要闻”的页面与正文文章。
+2. 在 Notion 的 `财经政经 / 人民日报 / 某年某月某日` 下生成日期父页。
+3. 日期父页包含全日总览、要闻版 PDF、按版面展开的文章列表，以及每篇文章的“整篇深度解读”。
+4. 每篇保留文章创建子页，子页承载“结构化原文与解析”：按意义单元分组，不机械逐自然段。
+5. 单篇文章分析概念上仍是两个源 prompt：`article_full_analysis_v1.md` 和 `article_structured_groups_v1.md`；生产上可以由脚本动态合并为一次模型调用，返回 `full_analysis + structured_groups`。
+6. 脚本质量门只做结构性硬校验：JSON/prompt_id、`full_analysis` 非空、`structured_groups` 覆盖全部输入段落、`paragraph_indices` 合法；风格和内容质量留在 prompt 自检与人工复核。
+7. 版务、责编、版式设计等非正文条目自动过滤；用 `people_daily_publications.json` 记录已发布日期，避免重复创建。
+8. 如果启用 Telegram，完成提醒只发送 Notion 链接，不发送本地 Markdown、manifest、缓存或输出目录。
 
 ```bash
 ~/.openclaw/workspace/market-immersion-module/scripts/run_people_daily_deep_read.sh \
@@ -83,43 +117,68 @@ journalctl --user -u openclaw-market-immersion-morning.service -n 100 --no-pager
 - `--dry-run`：只验证将要生成的 Notion 页面数量，不真正发布。
 - `--force`：更新已有日期页内容，默认不会重复创建同一天页面。
 
-输出目录默认是 `~/.openclaw/workspace/people-daily-deep-read/YYYY-MM-DD/`，包含 `manifest.json`、PDF 原件、Markdown 归档，以及一个本地 HTML 对照页。正式发布时会调用 OpenClaw 为每篇深读文章生成逐段解析，Notion 子页采用“逐段原文 + 对应解析 + 全文深度解读”的结构，便于审计原文和解释之间的关系。
+输出目录默认是 `~/.openclaw/workspace/people-daily-deep-read/YYYY-MM-DD/`，包含 `manifest.json`、PDF 原件、Markdown 归档、分析缓存，以及一个本地 HTML 对照页。正式发布时会调用 OpenClaw 为每篇保留文章生成 `full_analysis` 和 `structured_groups`：父页展示“整篇深度解读”，子页用 `paragraph_indices` 回填浅色原文并展示结构组解析。
 
-具体解读 prompt 不随仓库发布。仓库内置的只是 JSON 输出契约和最低质量要求；如果启用人民日报深读，建议用户在本机填入自己的私有 prompt。
+具体解读 prompt 不随仓库发布。仓库内置的只是流程、页面结构和结构性 JSON 契约；如果启用人民日报深读，建议用户在本机配置自己的私有 prompt。
 
 ### 配置自己的人民日报深读 prompt
 
-1. 在本机创建一个不提交到 GitHub 的 prompt 文件，例如：
+1. 在本机创建不提交到 GitHub 的 prompt 目录，例如：
 
 ```bash
-mkdir -p ~/.openclaw/private-prompts
-nano ~/.openclaw/private-prompts/people_daily_analysis_prompt.md
+mkdir -p ~/.openclaw/private-prompts/people_daily
+nano ~/.openclaw/private-prompts/people_daily/article_full_analysis_v1.md
+nano ~/.openclaw/private-prompts/people_daily/article_structured_groups_v1.md
+nano ~/.openclaw/private-prompts/people_daily/issue_overview_v1.md
 ```
 
-2. prompt 可以写自己的解读方法，但必须要求模型输出下面的 JSON 结构：
+2. 两个文章级源 prompt 分别负责两个任务：
+
+- `article_full_analysis_v1.md`：生成 `full_analysis`。
+- `article_structured_groups_v1.md`：生成 `structured_groups`。
+
+生产上可以设置 `combined_call: true`，由脚本运行时动态读取两个源 prompt 并合并成一次模型调用；不需要维护一个单独的 combined prompt 文件。
+
+3. 合并调用的输出 JSON 结构为：
 
 ```json
 {
-  "paragraph_notes": [
-    {"excerpt": "段首短摘", "analysis": "该段解析"}
-  ],
+  "prompt_id": "people_daily_article_combined_v1_2026-05-06",
+  "full_analysis": ["全文深度解读"],
   "signal_analysis": ["可选：信号/语境分析"],
   "policy_chain": ["可选：政策链路或观察点"],
   "follow_up": ["可选：后续跟踪事项"],
-  "full_analysis": ["全文深度解读"]
+  "structured_groups": [
+    {
+      "title": "结构组标题",
+      "paragraph_indices": [1, 2],
+      "analysis": "这一组为什么要放在一起读"
+    }
+  ]
 }
 ```
 
-其中 `paragraph_notes` 的数量应与原文段落数量一致。
-
-3. 在 `config/market_immersion_config.json` 中配置私有 prompt 路径：
+4. 在安装后的本机配置 `config/market_immersion_config.json` 中填写私有 prompt 路径：
 
 ```json
 "people_daily_deep_read": {
   "analysis": {
-    "prompt_template_path": "~/.openclaw/private-prompts/people_daily_analysis_prompt.md"
+    "combined_call": true,
+    "required_prompt_id": "people_daily_article_combined_v1_2026-05-06",
+    "full_analysis": {
+      "prompt_template_path": "~/.openclaw/private-prompts/people_daily/article_full_analysis_v1.md",
+      "required_prompt_id": "people_daily_full_analysis_v1_2026-05-06"
+    },
+    "structured_groups": {
+      "prompt_template_path": "~/.openclaw/private-prompts/people_daily/article_structured_groups_v1.md",
+      "required_prompt_id": "people_daily_structured_groups_v1_2026-05-06"
+    },
+    "overview": {
+      "prompt_template_path": "~/.openclaw/private-prompts/people_daily/issue_overview_v1.md",
+      "required_prompt_id": "people_daily_overview_v1_2026-05-06"
+    }
   }
 }
 ```
 
-4. 确认 prompt 文件没有被放进仓库；如果使用 git 管理自己的配置，请把私有 prompt 路径加入 `.gitignore`。
+5. 确认 prompt 文件没有被放进仓库；如果使用 git 管理自己的配置，请把私有 prompt 路径加入 `.gitignore`。

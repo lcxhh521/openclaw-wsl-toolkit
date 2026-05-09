@@ -12,7 +12,7 @@
     "morning": {
       "schedule": "09:05",
       "service": "openclaw-market-immersion-morning.service",
-      "timer": "openclaw-market-immersion.timer"
+      "timer": "openclaw-market-immersion-morning.timer"
     },
     "midday": {
       "schedule": "12:15",

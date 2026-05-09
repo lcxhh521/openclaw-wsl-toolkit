@@ -102,7 +102,7 @@ def main() -> int:
     raw_dir = day_dir / "raw" / slug
     raw_dir.mkdir(parents=True, exist_ok=True)
 
-    entry = mi.collect_eastmoney_feed_entry(
+    entry = mi.collect_market_feed_entry(
         config=config,
         output_dir=raw_dir,
         window_start=window_start,

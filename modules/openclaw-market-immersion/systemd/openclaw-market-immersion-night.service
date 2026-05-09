@@ -12,4 +12,4 @@ WorkingDirectory=%h/.openclaw/workspace/market-immersion-module
 Environment=MARKET_IMMERSION_DIR=%h/.openclaw/workspace/market-immersion-module
 EnvironmentFile=%h/.openclaw/secrets/mx.env
 Environment=MARKET_IMMERSION_PHASE=night
-ExecStart=%h/.openclaw/workspace/market-immersion-module/scripts/run_market_immersion.sh night
+ExecStart=%h/.openclaw/workspace/market-immersion-module/scripts/run_market_immersion.sh night --resume

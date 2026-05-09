@@ -25,11 +25,30 @@
     "analysis": {
       "enabled": true,
       "mode": "openclaw",
-      "agent": "main",
+      "agent": "daily-writer",
+      "model": "openai-codex/gpt-5.5",
       "thinking": "medium",
       "timeout": 300,
+      "parallelism": 5,
+      "combined_call": true,
       "detailed_max_page_no": 4,
-      "prompt_template_path": ""
+      "prompt_template_path": "",
+      "required_prompt_id": "people_daily_article_combined_v1_2026-05-06",
+      "full_analysis": {
+        "prompt_template_path": "",
+        "required_prompt_id": "people_daily_full_analysis_v1_2026-05-06"
+      },
+      "structured_groups": {
+        "prompt_template_path": "",
+        "required_prompt_id": "people_daily_structured_groups_v1_2026-05-06"
+      },
+      "overview": {
+        "enabled": true,
+        "prompt_template_path": "",
+        "required_prompt_id": "people_daily_overview_v1_2026-05-06",
+        "allow_deterministic_fallback": false
+      },
+      "allow_deterministic_fallback": false
     },
     "notion": {
       "enabled": false,
@@ -37,19 +56,51 @@
       "token_env": "NOTION_TOKEN",
       "finance_page_id": "",
       "people_daily_page_id": "",
-      "timeout": 120
+      "timeout": 120,
+      "people_daily_page_id_env": "NOTION_PEOPLE_DAILY_PAGE_ID"
     }
   },
   "openclaw_summary": {
     "enabled": true,
     "required": true,
     "summarize_smoke": true,
-    "agent": "main",
+    "agent": "daily-writer",
+    "model": "openai-codex/gpt-5.5",
     "thinking": "low",
     "timeout": 300,
     "retries": 3,
     "max_item_chars": 0,
-    "max_message_chars": 60000
+    "max_message_chars": 50000,
+    "input_mode": "full_file",
+    "allow_degraded_fallback": false
+  },
+  "raw_flow_classification": {
+    "enabled": false,
+    "agent": "ark-review",
+    "model": "volcengine-plan/glm-5.1",
+    "thinking": "low",
+    "timeout": 180,
+    "max_items": 260,
+    "shard_size": 60,
+    "parallelism": 3
+  },
+  "raw_flow_quality_check": {
+    "enabled": true,
+    "agent": "ark-review",
+    "model": "volcengine-plan/glm-5.1",
+    "thinking": "low",
+    "timeout": 180,
+    "max_items": 0,
+    "max_item_chars": 300,
+    "max_message_chars": 50000,
+    "role": "review_only_gpt_decides",
+    "gpt_review_decision_enabled": true,
+    "gpt_review_agent": "daily-writer",
+    "gpt_review_model": "openai-codex/gpt-5.5"
+  },
+  "pipeline": {
+    "collection_parallelism": 4,
+    "allow_degraded_publication": false
   },
   "eastmoney_feed": {
     "enabled": true,
@@ -148,6 +199,64 @@
         "max_pages": 20
       }
     ],
+    "tonghuashun_flash": [
+      {
+        "id": "ths_all",
+        "name": "同花顺实时快讯-全部",
+        "tag": "21101",
+        "page_size": 50,
+        "max_pages": 20
+      },
+      {
+        "id": "ths_important",
+        "name": "同花顺实时快讯-重要",
+        "tag": "-21101",
+        "page_size": 50,
+        "max_pages": 20
+      },
+      {
+        "id": "ths_a_share",
+        "name": "同花顺实时快讯-A股",
+        "tag": "21103",
+        "page_size": 50,
+        "max_pages": 20
+      },
+      {
+        "id": "ths_hk_stock",
+        "name": "同花顺实时快讯-港股",
+        "tag": "21105",
+        "page_size": 50,
+        "max_pages": 20
+      },
+      {
+        "id": "ths_us_stock",
+        "name": "同花顺实时快讯-美股",
+        "tag": "21107",
+        "page_size": 50,
+        "max_pages": 20
+      },
+      {
+        "id": "ths_opportunity",
+        "name": "同花顺实时快讯-机会",
+        "tag": "21109",
+        "page_size": 50,
+        "max_pages": 20
+      },
+      {
+        "id": "ths_unusual_move",
+        "name": "同花顺实时快讯-异动",
+        "tag": "21111",
+        "page_size": 50,
+        "max_pages": 20
+      },
+      {
+        "id": "ths_announcement",
+        "name": "同花顺实时快讯-公告",
+        "tag": "34843",
+        "page_size": 50,
+        "max_pages": 20
+      }
+    ],
     "wallstreetcn_live": [
       {
         "id": "wallstreetcn_global",
@@ -170,7 +279,9 @@
     "account": "default",
     "send_mode": "link",
     "send_smoke": false,
-    "timeout": 120
+    "timeout": 60,
+    "delivery_method": "bot_api",
+    "retry_attempts": 4
   },
   "runs": {
     "smoke": {

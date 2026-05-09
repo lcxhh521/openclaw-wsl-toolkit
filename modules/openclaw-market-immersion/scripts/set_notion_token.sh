@@ -3,6 +3,7 @@ set -euo pipefail
 
 secret_dir="$HOME/.openclaw/secrets"
 secret_file="$secret_dir/notion.env"
+parent_page_id="3548c93dc6b480a5b6ebe997305a30ff"
 
 mkdir -p "$secret_dir"
 chmod 700 "$secret_dir"
@@ -23,33 +24,13 @@ if [[ "$token" != ntn_* ]]; then
   exit 1
 fi
 
-echo "Paste the Notion parent page URL or page ID that this integration can access."
-printf "NOTION_PARENT_PAGE_ID or URL: "
-IFS= read -r parent_page_input
-parent_page_input="$(printf "%s" "$parent_page_input" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-if [[ -z "$parent_page_input" ]]; then
-  echo "Empty parent page, nothing written." >&2
-  exit 1
-fi
+{
+  printf "NOTION_TOKEN=%s\n" "$token"
+  printf "NOTION_PARENT_PAGE_ID=%s\n" "$parent_page_id"
+} > "$secret_file"
+chmod 600 "$secret_file"
 
-parent_page_id="$(
-  python3 - "$parent_page_input" <<'PY'
-import re
-import sys
-
-raw = sys.argv[1].strip()
-compact = raw.replace("-", "")
-matches = re.findall(r"[0-9a-fA-F]{32}", compact)
-if not matches:
-    raise SystemExit(1)
-print(matches[-1].lower())
-PY
-)" || {
-  echo "Could not find a 32-character Notion page ID in that input." >&2
-  exit 1
-}
-
-echo "Token length: ${#token}"
+echo "Saved token length: ${#token}"
 echo "Testing Notion authentication from inside WSL..."
 
 http_code="$(
@@ -74,27 +55,5 @@ else
   exit 1
 fi
 
-echo "Testing Notion parent page access..."
-page_http_code="$(
-  curl -sS -o /tmp/openclaw_notion_parent_page.json -w "%{http_code}" \
-    -H "Authorization: Bearer $token" \
-    -H "Notion-Version: 2022-06-28" \
-    "https://api.notion.com/v1/pages/$parent_page_id"
-)"
-
-if [[ "$page_http_code" == "200" ]]; then
-  echo "Notion parent page access: OK"
-else
-  echo "Notion parent page access failed: HTTP $page_http_code" >&2
-  cat /tmp/openclaw_notion_parent_page.json >&2
-  echo "Make sure the integration has access to the target page in Notion Content access." >&2
-  exit 1
-fi
-
-{
-  printf "NOTION_TOKEN=%s\n" "$token"
-  printf "NOTION_PARENT_PAGE_ID=%s\n" "$parent_page_id"
-} > "$secret_file"
-chmod 600 "$secret_file"
-
-echo "Done."
+echo "Done. Press Enter to close this window."
+IFS= read -r _

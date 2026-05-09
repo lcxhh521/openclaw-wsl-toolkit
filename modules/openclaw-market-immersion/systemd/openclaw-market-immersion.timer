@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule OpenClaw Market Immersion morning collection
+
+[Timer]
+OnCalendar=*-*-* 09:05:00
+Persistent=true
+Unit=openclaw-market-immersion-morning.service
+
+[Install]
+WantedBy=timers.target
