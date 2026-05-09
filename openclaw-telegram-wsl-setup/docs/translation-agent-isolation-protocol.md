@@ -5,6 +5,7 @@ Purpose: keep the main Telegram assistant as command / oversight / acceptance la
 ## Core boundary
 
 - Main does not conduct translation reasoning in the chat window.
+- For layout decisions, GPT participation happens inside the translation/layout workflow as an artifact-writing participant; main must not serve as GPT or final synthesizer.
 - Main does not absorb or summarize the translation agent's long narrative as truth.
 - Translation agent works from a file-based handoff brief and writes file-based artifacts.
 - Main accepts only a small machine-readable completion envelope from the translation agent.

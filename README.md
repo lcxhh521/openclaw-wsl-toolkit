@@ -466,7 +466,7 @@ openclaw-telegram-wsl-setup/tools/translation-agent/
 
 排版方案也已固化：整书双语 PDF 不直接套 raw Markdown/CSS，必须先构建 normalized IR；默认采用干净书籍式排版，英文段落在上、中文段落在下；不用卡片底纹、重边框、左侧竖线或低对比英文；每个新章节另起一页，但不对每个小节/段落滥用分页；复杂 OCR 表格默认用等宽 `pre` 保留，不假装成错列 HTML table。
 
-重要排版决策应在 translation/layout workflow 内部完成：GLM 和 MiniMax 分别产出详细方案，互相阅读、批判、说明哪些保留/改进；GPT 可以参与讨论，但必须由 translation agent/layout workflow 调用并写入 artifact，不能由 main 主脑直接调用 GPT 并综合方案。
+重要排版决策应在 translation/layout workflow 内部完成：GLM 和 MiniMax 分别产出详细方案；GLM、MiniMax、GPT 三方都参与排版评价与讨论，分别判断哪些设计应保留、哪些应改进，最后在 workflow 内收敛出最优 `layout_final_brief.md`。GPT 必须由 translation agent/layout workflow 调用并写入 artifact，不能由 main 主脑直接调用 GPT 并综合方案。
 
 ## IMA 知识库接入
 

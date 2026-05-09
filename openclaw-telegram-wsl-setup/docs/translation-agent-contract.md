@@ -284,8 +284,8 @@ Required layout discussion workflow:
    - `layout_critique_glm_on_minimax.md`
    - `layout_critique_minimax_on_glm.md`
    Each critique should explicitly say which parts of the other proposal should be kept, which should be changed, and why.
-3. GPT participates in this layout discussion inside the translation agent / layout workflow, not through the main Telegram assistant. The translation/layout workflow may call GPT to read the proposals and critiques and write `layout_discussion_gpt.md` or `layout_arbitration_gpt.md`, covering feasibility, tradeoffs, and synthesis suggestions. Main must not be used as the GPT-like synthesizer.
-4. Based on GLM + MiniMax + GPT discussion artifacts, the translation/layout workflow writes `layout_final_brief.md` as the shared executable plan.
+3. GPT is also an active participant in the layout evaluation/discussion, not a passive after-the-fact summarizer and not the main Telegram assistant. The translation/layout workflow must call GPT inside the translation agent/layout workflow to read the GLM and MiniMax proposals plus their critiques, evaluate which parts should be kept or improved, and write `layout_discussion_gpt.md` or `layout_arbitration_gpt.md` covering feasibility, tradeoffs, and concrete synthesis suggestions. Main must not be used as the GPT-like synthesizer.
+4. Based on the GLM + MiniMax + GPT evaluation/discussion artifacts, the translation/layout workflow writes `layout_final_brief.md` as the jointly converged best executable plan.
 5. The PDF/HTML build must implement `layout_final_brief.md`, and final verification must compare the artifact against that brief.
 
 The main/Telegram agent must not be the place where layout proposals are synthesized. Telegram receives only brief status and final artifact paths unless Alex explicitly asks to inspect the discussion.
