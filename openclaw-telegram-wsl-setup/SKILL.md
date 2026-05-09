@@ -1,6 +1,6 @@
 ---
 name: openclaw-telegram-wsl-setup
-description: "A safe, transparent, simple OpenClaw guide and WSL toolkit for Windows. Use when the user wants to install, run, repair, monitor, or understand OpenClaw on Windows through WSL2; needs gateway readiness checks, keepalive/autostart, local OpenClaw Monitor panel installation, optional market information immersion module setup, IMA OpenAPI skill setup for Tencent ima knowledge bases, long-offline network recovery, stale socket or polling recovery after internet loss, Telegram bot setup/repair, safe token entry, proxy-aware connectivity, pairing approval, channel startup verification, or diagnosis of messages that are not received, not answered, delayed, or only work while WSL is awake."
+description: "A safe, transparent, simple OpenClaw guide and WSL toolkit for Windows. Use when the user wants to install, run, repair, monitor, or understand OpenClaw on Windows through WSL2; needs gateway readiness checks, keepalive/autostart, local OpenClaw Monitor panel installation, optional market information immersion module setup, optional translation agent setup for long-document translation and bilingual PDF layout, IMA OpenAPI skill setup for Tencent ima knowledge bases, long-offline network recovery, stale socket or polling recovery after internet loss, Telegram bot setup/repair, safe token entry, proxy-aware connectivity, pairing approval, channel startup verification, or diagnosis of messages that are not received, not answered, delayed, or only work while WSL is awake."
 ---
 
 # OpenClaw 养虾指南（WSL Toolkit）
@@ -234,7 +234,16 @@ Codex may be able to infer and run the right install commands from the current e
    - Never ask the user to paste MX, Notion, Telegram, model, or provider keys into chat. Use local terminal prompts or provider UI only.
    - Explain that scheduling is handled by WSL `systemd --user` timers calling the module; the module then calls OpenClaw for整理. It is not OpenClaw's built-in scheduler.
 
-13. If the user wants optional API enhancements, offer Jina embeddings and Tavily web search from `tools/openclaw-optional-apis`.
+13. If the user wants a dedicated translation workflow, offer the optional translation agent module from `docs/translation-agent-*.md` and `tools/translation-agent/`.
+   - Treat translation agent as opt-in, not base OpenClaw infrastructure.
+   - Offer it only for long-document translation, whole-book translation, bilingual PDF output, translation layout, or dedicated translation workflows.
+   - Explain the architecture: main/Telegram is command, oversight, and acceptance; translation agent is an isolated executor using file-based handoff and artifact gates.
+   - Use `tools/translation-agent/translation_handoff.py` to create `user_request.md`, `handoff_brief.md`, `task_ledger.json`, and `acceptance_plan.json` for non-trivial tasks.
+   - Use `tools/translation-agent/translation_artifact_gate.py` before accepting worker outputs.
+   - For polished bilingual PDFs, the layout workflow must happen inside translation agent/layout workflow: GLM and MiniMax each produce detailed proposals, GLM/MiniMax/GPT all participate in evaluation/discussion, and the workflow writes `layout_final_brief.md`. Main must not call GPT directly or act as the synthesizing brain.
+   - For book/chapter layout, each new chapter starts on a new page.
+
+14. If the user wants optional API enhancements, offer Jina embeddings and Tavily web search from `tools/openclaw-optional-apis`.
    - Treat both as opt-in enhancements, not required OpenClaw infrastructure.
    - Jina is for `memorySearch` embeddings and semantic memory recall. It is not internet search.
    - Tavily is for OpenClaw `web_search` / periodic internet absorption. It is not memory embedding.
@@ -243,7 +252,7 @@ Codex may be able to infer and run the right install commands from the current e
    - Configure OpenClaw API keys as real env SecretRef objects using `openclaw config set ... --ref-provider default --ref-source env --ref-id ...`. Do not leave `env:JINA_API_KEY` as a raw string; OpenClaw may send that literal string as the API key and get false 401 errors.
    - Restart the gateway only after the user agrees, because it can briefly interrupt Telegram and channel startup.
 
-14. If the user wants local audio recognition through Doubao/Volcengine, install or verify the helper in `tools/openclaw-doubao-asr`.
+15. If the user wants local audio recognition through Doubao/Volcengine, install or verify the helper in `tools/openclaw-doubao-asr`.
    - Treat this as a separate ASR adapter, not as model routing.
    - Doubao text models can analyze transcripts; Ark chat models should not be described as native local-audio listeners unless the current provider docs prove that exact audio path works.
    - The Volcengine recording-file ASR path needs a speech resource in addition to the general API key. Flash mode normally uses `volc.bigasr.auc_turbo`; standard mode normally uses `volc.seedasr.auc`.
@@ -251,12 +260,12 @@ Codex may be able to infer and run the right install commands from the current e
    - The helper may run `openclaw-doubao-asr --self-check` without uploading audio.
    - Before transcribing a real local audio file, confirm with the user that the selected audio will be uploaded to Volcengine.
 
-15. Configure Telegram using a local token prompt or token file.
+16. Configure Telegram using a local token prompt or token file.
    - Guide the user through BotFather in Telegram if they do not already have a bot.
    - Token entry happens only in the local terminal prompt, never in chat.
    - Close token-entry windows after `openclaw channels status --json --timeout 30000` shows the token/config is available, unless the window is also the active gateway/keepalive path.
 
-16. Restart gateway once, wait for channel startup, approve pairing if needed, and verify a fresh Telegram message receives a reply.
+17. Restart gateway once, wait for channel startup, approve pairing if needed, and verify a fresh Telegram message receives a reply.
    - Explain the 60-120 second startup window.
    - Ask for a fresh message only after Telegram is ready or the startup grace period has passed.
    - Close successful setup windows after end-to-end Telegram reply verification, leaving only intentional hidden/minimized keepalive infrastructure.
@@ -834,8 +843,8 @@ Architecture to explain to the user:
 - The module is installed as files under the OpenClaw workspace.
 - Scheduling is handled by WSL `systemd --user` timers.
 - Each timer calls `scripts/run_market_immersion.sh`.
-- The script collects source feeds, deduplicates them, marks coverage warnings when a source cannot fully page back to the requested window start, then calls OpenClaw to produce a compact information digest.
-- Notion publishing happens only after source collection and OpenClaw digest generation succeed.
+- The script collects source feeds, deduplicates them, records `source_health` for failed/incomplete sources, applies primary-first source policy with verified backup candidates only when needed, then calls OpenClaw to produce a compact information digest.
+- Notion publishing happens only after source collection and OpenClaw digest generation succeed. Automatic degraded publication is not allowed: missing/failed sources should trigger diagnosis, recovery/failover attempts, or an explicit user decision before any incomplete publication.
 - This is not OpenClaw's own built-in scheduler. It is a reliable host timer that invokes OpenClaw as the processing layer.
 
 Default report structure:
@@ -848,12 +857,12 @@ Default report structure:
 
 Report rules:
 
-- The digest is written as 3-5 coherent natural paragraphs, not as fixed category columns.
+- The digest is written as 4-6 coherent natural paragraphs by default, not as fixed category columns.
 - The digest should preserve concrete subjects, numbers, event details, repeated themes, and meaningful differences across sources.
 - Do not mechanically include message publish time, title, or source inside the digest paragraphs. Include time only when the reported event time is itself part of the information.
 - The raw message flow keeps source, publish time, title, type, URL when available, and full original content in chronological order.
 - If the source pool is non-empty but OpenClaw digest generation fails or returns empty/low-quality summary paragraphs, treat the run as failed and do not publish it as a successful report.
-- Formal runs should attempt to cover the full requested feed window. If a source cannot page back far enough, publish only with an explicit coverage warning instead of silently implying completeness. Hard-fail only when core collection, OpenClaw整理, or enabled delivery steps fail.
+- Formal runs should attempt to cover the full requested feed window. If a source cannot page back far enough, publish only with an explicit coverage warning instead of silently implying completeness. Do not silently degrade or skip failed core sources; identify failed sources in `source_health`, try verified backup candidates only when primary fails, and require explicit user approval before any incomplete/degraded publication.
 
 Default time windows:
 
@@ -902,7 +911,11 @@ systemctl --user enable --now openclaw-market-immersion-morning.timer
 systemctl --user enable --now openclaw-market-immersion-midday.timer
 systemctl --user enable --now openclaw-market-immersion-close.timer
 systemctl --user enable --now openclaw-market-immersion-night.timer
-systemctl --user enable --now openclaw-market-feed-snapshot.timer
+# Enable only if the user also opts into the People's Daily daily deep-read workflow:
+# systemctl --user enable --now openclaw-people-daily-deep-read.timer
+# Enable only if the user opts into low-frequency backup-interface maintenance:
+# systemctl --user enable --now openclaw-source-interface-verification.timer
+# Do not enable openclaw-market-feed-snapshot.timer by default; use it only as an explicit temporary emergency fallback.
 ```
 
 Verification:
@@ -914,6 +927,61 @@ systemctl --user status openclaw-market-immersion-morning.timer --no-pager
 ```
 
 If the smoke test cannot query sources because of network, proxy, API, or provider changes, report that plainly and do not claim the scheduled daily report is production-ready.
+
+## Optional Translation Agent Module
+
+Use this section only when the user explicitly wants a dedicated translation workflow: long-document translation, whole-book translation, bilingual PDF output, translation layout, or translation-specific artifact management. This is an optional module, not part of base OpenClaw Telegram WSL setup.
+
+Bundled public contract and helper tools:
+
+```text
+docs/translation-agent-contract.md
+docs/translation-agent-isolation-protocol.md
+tools/translation-agent/translation_handoff.py
+tools/translation-agent/translation_artifact_gate.py
+```
+
+Architecture to explain:
+
+- Main/Telegram is command, oversight, and acceptance layer.
+- Translation agent is an isolated executor.
+- Non-trivial translation tasks use file-based handoff: preserve Alex's original request in `user_request.md`, then generate `handoff_brief.md`, `task_ledger.json`, and `acceptance_plan.json`.
+- Translation agent final chat output should be a small JSON envelope such as `candidate_ready`, not long process narrative or pasted translation.
+- Main must independently verify artifacts before calling anything final.
+
+For long/whole-book translation:
+
+- Split by chapter or natural boundary, not arbitrary chunks for final output.
+- Require artifact gate for workers.
+- Finalization order is coverage audit/repair → audited content freeze → layout/PDF build → final verification → delivery.
+- If a different source edition/version is discovered, report facts and ask Alex; do not mix editions without approval.
+
+For polished bilingual PDF layout:
+
+- Build a normalized intermediate representation before rendering.
+- Use clean book typography: English paragraph above, Chinese paragraph below; no card backgrounds, heavy borders, left vertical bars, or low-contrast source text.
+- Each new chapter starts on a new page; do not force every small section or paragraph pair to start a new page.
+- Complex OCR tables should default to monospaced `pre` preservation unless rebuilt manually from source.
+- GLM and MiniMax each produce detailed layout proposals. GLM, MiniMax, and GPT all participate in layout evaluation/discussion inside the translation/layout workflow; GPT must not be called by main as the synthesizing brain. The workflow writes `layout_final_brief.md`, then the build implements and verifies against that brief.
+
+Handoff helper example:
+
+```bash
+python3 tools/translation-agent/translation_handoff.py \
+  --title "book-translation" \
+  --request-file /path/to/alex-request.md \
+  --source /path/to/source.pdf
+```
+
+Artifact gate example:
+
+```bash
+python3 tools/translation-agent/translation_artifact_gate.py \
+  --cwd translation-runs/<run-id> \
+  --expect manifest.json \
+  --expect translation.md \
+  --min-bytes 20
+```
 
 ## Optional API Enhancements
 
