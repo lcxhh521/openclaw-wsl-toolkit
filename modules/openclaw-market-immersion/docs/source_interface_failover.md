@@ -29,8 +29,8 @@ Policy:
 ## Core objects
 
 1. Source registry: `config/source_registry.json`
-   - public repository contains only a schema/example registry
-   - operational interface URLs, request parameters, signatures and field mappings must stay in the installed local workspace
+   - public repository may contain current primary collection interfaces
+   - extra backup candidates, experimental replacements, signatures and operator-specific failover details should stay in the installed local workspace
    - verification policy
 
 2. Verifier: `scripts/verify_source_interfaces.py`

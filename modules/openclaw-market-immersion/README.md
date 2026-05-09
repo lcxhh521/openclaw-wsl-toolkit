@@ -84,7 +84,7 @@ journalctl --user -u openclaw-market-immersion-morning.service -n 100 --no-pager
 
 - `pipeline.allow_degraded_publication` 默认 `false`；降级发布、跳过失败源或补发不完整版本都需要用户明确批准。
 - 每次抓取会在 manifest 中写入 `source_health`，列出失败/窗口不足的数据源、错误原因、恢复/备用接口建议。
-- 备用接口由安装后的本机私有 `config/source_registry.json` 维护；公开仓库只保留结构示例，不发布具体 URL、参数、签名或字段映射。`scripts/verify_source_interfaces.py` 负责只读验证。
+- 当前主源接口可以写在公开 `config/source_registry.json`；额外备用接口候选只放安装后的本机私有 registry，不随公开仓库发布。`scripts/verify_source_interfaces.py` 负责只读验证。
 - `openclaw-source-interface-verification.timer` 默认每月 1 日和 16 日 07:05 CST 运行一次，低频验证候选接口，不发布日报、不替换主源。
 - 日报运行时主源优先；只有主源当前失败时，才使用最近验证为 `backup_ready` 的候选接口；下一轮主源恢复后自动 fail back。
 

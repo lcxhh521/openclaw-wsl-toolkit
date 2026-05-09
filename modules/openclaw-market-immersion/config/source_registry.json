@@ -7,25 +7,204 @@
     "failover_policy": "primary_first; use backup_ready candidate only when primary fails current run; automatically return to primary once primary verifies healthy again; backup is not a permanent replacement",
     "failback_rule": "if primary endpoint succeeds in a later run, clear failover and use primary immediately",
     "operator_rule": "if no backup_ready candidate exists, block/report rather than publish degraded unless Alex explicitly approves",
-    "public_repo_note": "Concrete source interface URLs, parameters, signatures and field mappings are intentionally not published. Keep the operational registry in the installed local workspace only."
+    "public_repo_note": "Current primary collection interfaces may be published. Extra backup candidates, experimental replacements, and operator-specific failover details should stay in the installed local workspace.",
+    "backup_publication_rule": "Do not publish additional backup candidates in the public repository unless explicitly approved."
   },
   "sources": [
     {
-      "id": "example_source_family",
-      "name": "Example Market Source Family",
-      "official_url": "https://example.com/official-page",
-      "primary": "local_registry_primary_id",
+      "id": "eastmoney_news_columns",
+      "name": "东方财富财经资讯",
+      "official_url": "https://finance.eastmoney.com/",
+      "primary": "eastmoney_getNewsByColumns_350",
       "candidates": [
         {
-          "id": "local_registry_candidate_id",
-          "kind": "json_endpoint_or_signed_endpoint",
-          "url": "LOCAL_ONLY_NOT_PUBLISHED",
-          "params": "LOCAL_ONLY_NOT_PUBLISHED",
-          "items_path": "LOCAL_ONLY_NOT_PUBLISHED",
-          "fields": "LOCAL_ONLY_NOT_PUBLISHED"
+          "id": "eastmoney_getNewsByColumns_350",
+          "kind": "json_endpoint",
+          "url": "https://np-listapi.eastmoney.com/comm/web/getNewsByColumns",
+          "params": {
+            "client": "web",
+            "biz": "web_news_col",
+            "column": "350",
+            "pageSize": "20",
+            "page": "1"
+          },
+          "items_path": "data.list",
+          "fields": {
+            "title": "title",
+            "content": "summary|digest|content",
+            "time": "showTime|time|date",
+            "url": "uniqueUrl|url"
+          }
         }
       ],
-      "note": "Replace this example with locally verified interfaces in the installed private registry. Do not commit operational endpoints."
+      "backup_candidates_public_note": "Only the current primary interface is published here. Extra backup candidates belong in the installed local private registry."
+    },
+    {
+      "id": "eastmoney_fastnews_global",
+      "name": "东方财富7x24全球直播",
+      "official_url": "https://kuaixun.eastmoney.com/",
+      "primary": "eastmoney_fastnews_102",
+      "candidates": [
+        {
+          "id": "eastmoney_fastnews_102",
+          "kind": "json_endpoint",
+          "url": "https://np-weblist.eastmoney.com/comm/web/getFastNewsList",
+          "params": {
+            "client": "web",
+            "biz": "web_724",
+            "fastColumn": "102",
+            "sortEnd": "",
+            "pageSize": "20",
+            "req_trace": "NOW_MS"
+          },
+          "items_path": "data.fastNewsList",
+          "fields": {
+            "title": "title",
+            "content": "summary|digest|simdigest",
+            "time": "showTime|showtime|ordertime",
+            "url": "url_unique|url_w|url_m"
+          }
+        }
+      ],
+      "backup_candidates_public_note": "Only the current primary interface is published here. Extra backup candidates belong in the installed local private registry."
+    },
+    {
+      "id": "cls_telegraph",
+      "name": "财联社电报",
+      "official_url": "https://www.cls.cn/telegraph",
+      "primary": "cls_nodeapi_telegraphList",
+      "candidates": [
+        {
+          "id": "cls_nodeapi_telegraphList",
+          "kind": "cls_signed_json_endpoint",
+          "url": "https://www.cls.cn/nodeapi/telegraphList",
+          "params": {
+            "app": "CailianpressWeb",
+            "category": "",
+            "lastTime": "NOW_TS",
+            "last_time": "NOW_TS",
+            "os": "web",
+            "refresh_type": "1",
+            "rn": "30",
+            "sv": "8.4.6"
+          },
+          "items_path": "data.roll_data",
+          "fields": {
+            "title": "title|brief",
+            "content": "content|brief",
+            "time": "ctime",
+            "url": "shareurl|url"
+          }
+        }
+      ],
+      "backup_candidates_public_note": "Only the current primary interface is published here. Extra backup candidates belong in the installed local private registry."
+    },
+    {
+      "id": "jin10_flash",
+      "name": "金十数据快讯",
+      "official_url": "https://www.jin10.com/flash",
+      "primary": "jin10_flash_ajax",
+      "candidates": [
+        {
+          "id": "jin10_flash_ajax",
+          "kind": "json_endpoint",
+          "url": "https://flash-api.jin10.com/get_flash_list",
+          "params": {
+            "channel": "-8200"
+          },
+          "headers": {
+            "x-app-id": "bVBF4FyRTn5NJF5n",
+            "Referer": "https://www.jin10.com/"
+          },
+          "items_path": "data",
+          "fields": {
+            "title": "data.title|data.content",
+            "content": "data.content",
+            "time": "time",
+            "url": "data.link"
+          }
+        }
+      ],
+      "backup_candidates_public_note": "Only the current primary interface is published here. Extra backup candidates belong in the installed local private registry."
+    },
+    {
+      "id": "tonghuashun_flash_all",
+      "name": "同花顺实时快讯-全部",
+      "official_url": "https://news.10jqka.com.cn/realtimenews.html",
+      "primary": "ths_push_stock_21101",
+      "candidates": [
+        {
+          "id": "ths_push_stock_21101",
+          "kind": "json_endpoint",
+          "url": "https://news.10jqka.com.cn/tapp/news/push/stock/",
+          "params": {
+            "page": "1",
+            "track": "website",
+            "pagesize": "20",
+            "tag": "21101"
+          },
+          "items_path": "data.list",
+          "fields": {
+            "title": "title",
+            "content": "digest|short",
+            "time": "rtime|ctime",
+            "url": "url|shareUrl|appUrl"
+          }
+        }
+      ],
+      "backup_candidates_public_note": "Only the current primary interface is published here. Extra backup candidates belong in the installed local private registry."
+    },
+    {
+      "id": "sina_finance_7x24",
+      "name": "新浪财经7x24",
+      "official_url": "https://finance.sina.com.cn/7x24/",
+      "primary": "sina_zhibo_152",
+      "candidates": [
+        {
+          "id": "sina_zhibo_152",
+          "kind": "json_endpoint",
+          "url": "http://zhibo.sina.com.cn/api/zhibo/feed",
+          "params": {
+            "page": "1",
+            "page_size": "20",
+            "zhibo_id": "152"
+          },
+          "items_path": "result.data.feed.list",
+          "fields": {
+            "title": "rich_text",
+            "content": "rich_text",
+            "time": "create_time|update_time",
+            "url": "docurl"
+          }
+        }
+      ],
+      "backup_candidates_public_note": "Only the current primary interface is published here. Extra backup candidates belong in the installed local private registry."
+    },
+    {
+      "id": "wallstreetcn_live_global",
+      "name": "华尔街见闻7x24",
+      "official_url": "https://wallstreetcn.com/live/global",
+      "primary": "wscn_lives_global_channel",
+      "candidates": [
+        {
+          "id": "wscn_lives_global_channel",
+          "kind": "json_endpoint",
+          "url": "https://api-one-wscn.awtmt.com/apiv1/content/lives",
+          "params": {
+            "channel": "global-channel",
+            "client": "pc",
+            "limit": "20"
+          },
+          "items_path": "data.items",
+          "fields": {
+            "title": "title",
+            "content": "content_text|content",
+            "time": "display_time",
+            "url": "uri"
+          }
+        }
+      ],
+      "backup_candidates_public_note": "Only the current primary interface is published here. Extra backup candidates belong in the installed local private registry."
     }
   ]
 }
