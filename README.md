@@ -53,7 +53,7 @@ Windows
 
 ## 它能做什么
 
-这套东西主要分成六块。
+这套东西主要分成七块。
 
 第一块是安装和修复。它会优先按 Windows + WSL2 + Ubuntu 的路线处理 OpenClaw，先把 gateway、systemd user service、模型回复和权限范围确认好，再接 Telegram。
 
@@ -67,7 +67,9 @@ Windows
 
 第五块是 IMA 知识库接入。它记录了如何给 OpenClaw 安装官方 `ima-skills`，用 IMA OpenAPI 读取和搜索腾讯 ima 知识库、添加网页/微信文章、上传文件、管理笔记，并通过自然语言触发这些能力。
 
-第六块是可选增强。比如 Jina embeddings、Tavily web search、豆包/火山录音文件识别。这些不是基础安装必需项，只有真的需要语义记忆、联网检索或本地音频处理时再加。
+第六块是 translation agent 选装模块。它不是基础安装必需项，只在用户明确需要长文翻译、整书翻译、双语 PDF、翻译排版或专门翻译工作流时启用；它强调 main/Telegram 只做指挥、监督和验收，translation agent 作为隔离执行层通过文件交接、artifact gate 和排版 workflow 交付结果。
+
+第七块是可选增强。比如 Jina embeddings、Tavily web search、豆包/火山录音文件识别。这些不是基础安装必需项，只有真的需要语义记忆、联网检索或本地音频处理时再加。
 
 另外，它会特别注意几件容易出事故的事：不要把 token 发到聊天里，不要把 key 写进仓库，不要随便重置配置，不要把“机器人没回”直接等同于“Telegram token 坏了”。
 
@@ -90,6 +92,9 @@ Windows
     |-- SKILL.md
     |-- agents/
     |   `-- openai.yaml
+    |-- docs/
+    |   |-- translation-agent-contract.md
+    |   `-- translation-agent-isolation-protocol.md
     `-- tools/
         |-- openclaw-local-monitor/
         |   |-- OpenClawMonitor.cs
@@ -116,15 +121,18 @@ Windows
         |   |-- Install-DoubaoAsrTool.ps1
         |   |-- Set-DoubaoAsrCredentials.ps1
         |   `-- README.md
-        `-- openclaw-optional-apis/
-            |-- Set-JinaApiKey.ps1
-            |-- Set-TavilyApiKey.ps1
-            |-- Repair-OpenClawMemoryDeepStatus.ps1
-            |-- save-openclaw-jina-key.sh
-            |-- save-openclaw-tavily-key.sh
-            |-- repair-openclaw-memory-deep-status.py
-            |-- Verify-JinaKey.py
-            `-- Verify-TavilyKey.py
+        |-- openclaw-optional-apis/
+        |   |-- Set-JinaApiKey.ps1
+        |   |-- Set-TavilyApiKey.ps1
+        |   |-- Repair-OpenClawMemoryDeepStatus.ps1
+        |   |-- save-openclaw-jina-key.sh
+        |   |-- save-openclaw-tavily-key.sh
+        |   |-- repair-openclaw-memory-deep-status.py
+        |   |-- Verify-JinaKey.py
+        |   `-- Verify-TavilyKey.py
+        `-- translation-agent/
+            |-- translation_handoff.py
+            `-- translation_artifact_gate.py
 ```
 
 真正的 Codex skill 仍然是：
