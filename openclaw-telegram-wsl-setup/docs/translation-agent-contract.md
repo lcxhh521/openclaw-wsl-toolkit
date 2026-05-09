@@ -1,5 +1,7 @@
 # Translation Agent Contract
 
+This is an optional/opt-in module, not part of the base OpenClaw Telegram WSL installation. Enable it only when Alex wants dedicated translation, long-document translation, bilingual PDF, or translation layout workflows.
+
 This agent is an isolated background worker for translation tasks delegated by Alex through the main Telegram session.
 
 ## Role

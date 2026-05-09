@@ -1,5 +1,7 @@
 # Translation Agent Isolation Protocol
 
+This is an optional/opt-in module, not part of the base OpenClaw Telegram WSL installation.
+
 Purpose: keep the main Telegram assistant as command / oversight / acceptance layer, and the translation agent as an isolated executor. This is an architectural boundary, not just a style preference.
 
 ## Core boundary
