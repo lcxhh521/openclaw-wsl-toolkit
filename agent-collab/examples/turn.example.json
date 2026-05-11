@@ -1,0 +1,10 @@
+{
+  "bridge": "agent-mailbox",
+  "seq": 1,
+  "last_writer": "agent-a",
+  "needs_reply": "agent-b",
+  "updated_at": "2026-05-12T00:00:00+08:00",
+  "agent_a_file": "/path/to/mailbox/agent_a_to_agent_b.md",
+  "agent_b_file": "/path/to/mailbox/agent_b_to_agent_a.md",
+  "note": "Example turn state. Do not store secrets here."
+}
