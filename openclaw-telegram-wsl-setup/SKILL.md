@@ -1,6 +1,6 @@
 ---
 name: openclaw-telegram-wsl-setup
-description: "A safe, transparent, simple OpenClaw guide and WSL toolkit for Windows. Use when the user wants to install, run, repair, monitor, or understand OpenClaw on Windows through WSL2; needs gateway readiness checks, keepalive/autostart, local OpenClaw Monitor panel installation, optional market information immersion module setup, optional translation agent setup for long-document translation and bilingual PDF layout, IMA OpenAPI skill setup for Tencent ima knowledge bases, long-offline network recovery, stale socket or polling recovery after internet loss, Telegram bot setup/repair, safe token entry, proxy-aware connectivity, pairing approval, channel startup verification, or diagnosis of messages that are not received, not answered, delayed, or only work while WSL is awake."
+description: "A safe, transparent, simple OpenClaw guide and WSL toolkit for Windows. Use when the user wants to install, run, repair, monitor, or understand OpenClaw on Windows through WSL2; needs gateway readiness checks, keepalive/autostart, local OpenClaw Monitor panel installation, optional market information immersion module setup, optional translation agent setup for long-document translation and bilingual PDF layout, optional agent collaboration mailbox setup for main↔Codex/external-agent handoff, IMA OpenAPI skill setup for Tencent ima knowledge bases, long-offline network recovery, stale socket or polling recovery after internet loss, Telegram bot setup/repair, safe token entry, proxy-aware connectivity, pairing approval, channel startup verification, or diagnosis of messages that are not received, not answered, delayed, or only work while WSL is awake."
 ---
 
 # OpenClaw 养虾指南（WSL Toolkit）
@@ -243,7 +243,16 @@ Codex may be able to infer and run the right install commands from the current e
    - For polished bilingual PDFs, the layout workflow must happen inside translation agent/layout workflow: GLM and MiniMax each produce detailed proposals, GLM/MiniMax/GPT all participate in evaluation/discussion, and the workflow writes `layout_final_brief.md`. Main must not call GPT directly or act as the synthesizing brain.
    - For book/chapter layout, each new chapter starts on a new page.
 
-14. If the user wants optional API enhancements, offer Jina embeddings and Tavily web search from `tools/openclaw-optional-apis`.
+14. If the user wants main ↔ Codex/external-agent collaboration, offer the optional `agent-collab` module from the repository root.
+   - Treat agent collaboration as opt-in, not base OpenClaw infrastructure and not a default skill install.
+   - Use it only when the user explicitly wants asynchronous multi-agent handoff, for example OpenClaw main coordinating with Codex/Cursor/Claude Code/coding agents through a shared mailbox.
+   - Explain the two-way reminder mechanism: main writes `main_to_codex.md` and sets `turn.json.needs_reply=codex`; the external watcher runs local `CODEX_WAKE_COMMAND`; Codex writes `codex_to_main.md` and sets `needs_reply=main`; the OpenClaw watcher calls `openclaw agent --session-id ...`.
+   - The reliable completion signal is `turn.json` being advanced by the expected writer, not a watcher process merely starting.
+   - Install only after the user confirms. Follow `agent-collab/OPTIONAL_INSTALL.md`: create a mailbox, copy `turn.example.json`, configure the main-side watcher, then configure the external/Codex-side watcher.
+   - Keep watcher intervals low-frequency, e.g. 1-5 minutes; use lock files, per-seq retry cooldown, and max attempts. Do not create high-frequency polling.
+   - Do not read secrets, do not delete user files, do not auto-publish Telegram/Notion/GitHub, and do not change quality/model/content prompts as part of installation.
+
+15. If the user wants optional API enhancements, offer Jina embeddings and Tavily web search from `tools/openclaw-optional-apis`.
    - Treat both as opt-in enhancements, not required OpenClaw infrastructure.
    - Jina is for `memorySearch` embeddings and semantic memory recall. It is not internet search.
    - Tavily is for OpenClaw `web_search` / periodic internet absorption. It is not memory embedding.
@@ -252,7 +261,7 @@ Codex may be able to infer and run the right install commands from the current e
    - Configure OpenClaw API keys as real env SecretRef objects using `openclaw config set ... --ref-provider default --ref-source env --ref-id ...`. Do not leave `env:JINA_API_KEY` as a raw string; OpenClaw may send that literal string as the API key and get false 401 errors.
    - Restart the gateway only after the user agrees, because it can briefly interrupt Telegram and channel startup.
 
-15. If the user wants local audio recognition through Doubao/Volcengine, install or verify the helper in `tools/openclaw-doubao-asr`.
+16. If the user wants local audio recognition through Doubao/Volcengine, install or verify the helper in `tools/openclaw-doubao-asr`.
    - Treat this as a separate ASR adapter, not as model routing.
    - Doubao text models can analyze transcripts; Ark chat models should not be described as native local-audio listeners unless the current provider docs prove that exact audio path works.
    - The Volcengine recording-file ASR path needs a speech resource in addition to the general API key. Flash mode normally uses `volc.bigasr.auc_turbo`; standard mode normally uses `volc.seedasr.auc`.

@@ -53,7 +53,7 @@ Windows
 
 ## 它能做什么
 
-这套东西主要分成七块。
+这套东西主要分成八块。
 
 第一块是安装和修复。它会优先按 Windows + WSL2 + Ubuntu 的路线处理 OpenClaw，先把 gateway、systemd user service、模型回复和权限范围确认好，再接 Telegram。
 
@@ -69,7 +69,9 @@ Windows
 
 第六块是 translation agent 选装模块。它不是基础安装必需项，只在用户明确需要长文翻译、整书翻译、双语 PDF、翻译排版或专门翻译工作流时启用；它强调 main/Telegram 只做指挥、监督和验收，translation agent 作为隔离执行层通过文件交接、artifact gate 和排版 workflow 交付结果。
 
-第七块是可选增强。比如 Jina embeddings、Tavily web search、豆包/火山录音文件识别。这些不是基础安装必需项，只有真的需要语义记忆、联网检索或本地音频处理时再加。
+第七块是 agent 协作选装模块。它把今晚验证过的 main ↔ Codex mailbox 协作方式整理成独立模块：双方通过 `turn.json` 和 Markdown 消息文件交接，watcher 低频提醒对方继续，不把“进程触发过”误当成“对方已经回复”。这个模块不是基础安装必需项，只有用户明确需要 OpenClaw main 与 Codex/Cursor/Claude Code 等外部 agent 异步协作时才安装。
+
+第八块是可选增强。比如 Jina embeddings、Tavily web search、豆包/火山录音文件识别。这些不是基础安装必需项，只有真的需要语义记忆、联网检索或本地音频处理时再加。
 
 另外，它会特别注意几件容易出事故的事：不要把 token 发到聊天里，不要把 key 写进仓库，不要随便重置配置，不要把“机器人没回”直接等同于“Telegram token 坏了”。
 
@@ -81,6 +83,11 @@ Windows
 |-- .gitignore
 |-- assets/
 |   `-- openclaw-mascot.png
+|-- agent-collab/
+|   |-- README.md
+|   |-- OPTIONAL_INSTALL.md
+|   |-- examples/
+|   `-- scripts/
 |-- modules/
 |   `-- openclaw-market-immersion/
 |       |-- README.md
@@ -457,6 +464,29 @@ systemctl --user enable --now openclaw-source-interface-verification.timer
 ```
 
 `openclaw-market-feed-snapshot.timer` 是接口失效且暂无可用备用接口时的临时兜底快照，不默认启用；正常情况下依赖主源优先、已验证备用接口临时 failover、主源恢复后自动 failback。
+
+
+## 可选模块：Agent collaboration v0
+
+`agent-collab/` 是一个独立选装模块，用来让 OpenClaw main 和外部 agent（例如 Codex、Cursor、Claude Code 或其他本地 coding agent）通过共享 mailbox 异步协作。它不属于基础 OpenClaw/Telegram 安装，也不会默认启用；只有用户明确需要“多个 agent 互相接力、讨论、交付 artifact”时才安装。
+
+核心文件是：
+
+```text
+agent-collab/README.md
+agent-collab/OPTIONAL_INSTALL.md
+agent-collab/examples/turn.example.json
+agent-collab/scripts/openclaw-main-mailbox-watch.py
+agent-collab/scripts/codex-mailbox-watch.py
+```
+
+协作方式很简单：
+
+- Main 提醒 Codex：main 写 `main_to_codex.md`，把 `turn.json` 更新为 `needs_reply=codex`，Codex 侧 watcher 看到后执行本机 `CODEX_WAKE_COMMAND`。
+- Codex 提醒 Main：Codex 写 `codex_to_main.md`，把 `turn.json` 更新为 `needs_reply=main`，OpenClaw 侧 watcher 看到后调用 `openclaw agent --session-id ...` 唤醒 main。
+- 判断是否闭环只看 `turn.json` 是否被预期一方推进；不能只看 watcher 是否启动过进程。
+
+安装时应按 `agent-collab/OPTIONAL_INSTALL.md` 走：创建 mailbox，配置 main-side watcher，再配置 Codex/external-agent watcher。watcher 必须低频运行，带 lock、重试间隔和最大尝试次数；不要做高频状态轮询，不要自动发布 Telegram/Notion，不要读取 secrets，不要删除用户文件。
 
 ## 可选模块：Translation agent 契约与隔离
 
