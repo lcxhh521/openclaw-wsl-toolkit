@@ -1,6 +1,6 @@
 # Agent Collaboration v0
 
-This module captures the first OpenClaw multi-agent collaboration pattern used between Telegram-facing `main` and an external coding/Codex agent.
+This optional module captures the first OpenClaw multi-agent collaboration pattern used between Telegram-facing `main` and an external coding/Codex agent. It is not installed by default; users opt in when they want an asynchronous mailbox between agents.
 
 ## Goals
 
@@ -9,6 +9,10 @@ This module captures the first OpenClaw multi-agent collaboration pattern used b
 - Preserve Alex as the owner/approval gate.
 - Prefer read-only diagnostics and additive artifacts.
 - Avoid high-frequency polling and heavy gateway/status probes.
+
+## Optional installation
+
+See `OPTIONAL_INSTALL.md`. The short version: create a mailbox, configure the main-side watcher, configure the external/Codex-side watcher, and keep both low-frequency.
 
 ## Mailbox protocol
 
@@ -31,6 +35,9 @@ The reliable completion signal is not “a watcher process was triggered”; it 
   - Symmetric watcher for `needs_reply=codex` turns.
   - Uses the same per-seq retry/lock pattern.
   - The actual Codex wake command is supplied by `CODEX_WAKE_COMMAND` so local Desktop/CLI automation can differ.
+
+- `examples/install-main-watcher-systemd.sh`
+  - Example user-level systemd timer installer for the OpenClaw main-side watcher.
 
 - `examples/install-codex-watcher-task.ps1`
   - Example Windows Scheduled Task installer for running the Codex-side watcher every 5 minutes.
