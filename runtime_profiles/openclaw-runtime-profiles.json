@@ -1,0 +1,183 @@
+{
+  "schema": "openclaw.runtime_profiles.v0",
+  "notes": "Hot stays loaded for Telegram/main. Warm can be activated with TTL. Full preserves the original allow list.",
+  "profiles": {
+    "hot": {
+      "plugins_allow": [
+        "telegram",
+        "openai",
+        "volcengine",
+        "codex",
+        "memory-core",
+        "tavily",
+        "openclaw-weixin",
+        "openclaw-wechat-desktop",
+        "deepseek",
+        "file-transfer",
+        "device-pair",
+        "web-readability",
+        "document-extract"
+      ],
+      "description": "Default interactive main/Telegram hot path."
+    },
+    "warm": {
+      "plugins_allow": [
+        "telegram",
+        "openai",
+        "volcengine",
+        "codex",
+        "memory-core",
+        "tavily",
+        "openclaw-weixin",
+        "openclaw-wechat-desktop",
+        "deepseek",
+        "file-transfer",
+        "device-pair",
+        "web-readability",
+        "document-extract",
+        "browser",
+        "qwen",
+        "kimi",
+        "moonshot",
+        "openrouter",
+        "qianfan",
+        "tencent",
+        "qqbot"
+      ],
+      "description": "Hot plus recently-used interactive providers/tools."
+    },
+    "full": {
+      "plugins_allow": [
+        "acpx",
+        "alibaba",
+        "amazon-bedrock",
+        "amazon-bedrock-mantle",
+        "anthropic",
+        "anthropic-vertex",
+        "arcee",
+        "azure-speech",
+        "bonjour",
+        "browser",
+        "byteplus",
+        "cerebras",
+        "chutes",
+        "cloudflare-ai-gateway",
+        "comfy",
+        "copilot-proxy",
+        "deepgram",
+        "deepinfra",
+        "deepseek",
+        "device-pair",
+        "document-extract",
+        "elevenlabs",
+        "fal",
+        "file-transfer",
+        "fireworks",
+        "github-copilot",
+        "google",
+        "groq",
+        "huggingface",
+        "inworld",
+        "kilocode",
+        "kimi",
+        "litellm",
+        "lmstudio",
+        "memory-core",
+        "microsoft",
+        "microsoft-foundry",
+        "minimax",
+        "mistral",
+        "moonshot",
+        "nvidia",
+        "ollama",
+        "openai",
+        "openclaw-wechat-desktop",
+        "openclaw-weixin",
+        "opencode",
+        "opencode-go",
+        "openrouter",
+        "phone-control",
+        "qianfan",
+        "qqbot",
+        "qwen",
+        "runway",
+        "senseaudio",
+        "sglang",
+        "stepfun",
+        "synthetic",
+        "talk-voice",
+        "tavily",
+        "telegram",
+        "tencent",
+        "together",
+        "tts-local-cli",
+        "venice",
+        "vercel-ai-gateway",
+        "vllm",
+        "volcengine",
+        "voyage",
+        "vydra",
+        "web-readability",
+        "xai",
+        "xiaomi",
+        "zai",
+        "codex"
+      ],
+      "description": "Original full allow list, rollback/reference profile."
+    }
+  },
+  "capabilities": {
+    "browser_research": {
+      "plugins": [
+        "browser",
+        "web-readability",
+        "document-extract"
+      ],
+      "ttl_minutes": 120
+    },
+    "alt_llm_providers": {
+      "plugins": [
+        "qwen",
+        "kimi",
+        "moonshot",
+        "openrouter",
+        "qianfan",
+        "google",
+        "groq",
+        "ollama",
+        "vllm"
+      ],
+      "ttl_minutes": 120
+    },
+    "qqbot": {
+      "plugins": [
+        "qqbot",
+        "tencent"
+      ],
+      "ttl_minutes": 180
+    },
+    "voice": {
+      "plugins": [
+        "tts-local-cli",
+        "azure-speech",
+        "deepgram",
+        "senseaudio"
+      ],
+      "ttl_minutes": 90
+    },
+    "media_generation": {
+      "plugins": [
+        "runway",
+        "fal",
+        "comfy"
+      ],
+      "ttl_minutes": 90
+    }
+  },
+  "defaults": {
+    "boot_profile": "auto",
+    "warm_ttl_minutes": 120,
+    "model_ping_on_boot": false,
+    "apply_requires_gateway_restart_to_affect_running_process": true
+  }
+}
