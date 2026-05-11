@@ -27,6 +27,17 @@ The reliable completion signal is not “a watcher process was triggered”; it 
   - Uses lock file, per-seq retry cooldown, and max attempts.
   - Does not delete files.
 
+- `scripts/codex-mailbox-watch.py`
+  - Symmetric watcher for `needs_reply=codex` turns.
+  - Uses the same per-seq retry/lock pattern.
+  - The actual Codex wake command is supplied by `CODEX_WAKE_COMMAND` so local Desktop/CLI automation can differ.
+
+- `examples/install-codex-watcher-task.ps1`
+  - Example Windows Scheduled Task installer for running the Codex-side watcher every 5 minutes.
+
+- `examples/codex-watcher-env.example`
+  - Example local environment variables for the Codex-side watcher.
+
 - `scripts/daily_status_card.py`
   - Read-only daily delivery status card from local manifests/tasks/checkpoints.
   - Intended to answer “what succeeded, what is blocked, and what is the next safe action?” without publishing.
@@ -47,6 +58,6 @@ The reliable completion signal is not “a watcher process was triggered”; it 
 ## Current limitations
 
 - This is v0, not a complete agent room system.
-- Codex-side wakeup still depends on Codex-side heartbeat/automation.
+- Codex-side wakeup still depends on a local `CODEX_WAKE_COMMAND` or scheduled-task/heartbeat integration.
 - Status scripts are diagnostic surfaces; they do not guarantee successful delivery by themselves.
 - Recovery actions must be routed through background tasks with preflight and quality gates.

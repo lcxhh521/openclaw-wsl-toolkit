@@ -1,0 +1,12 @@
+# Example environment for agent-collab/scripts/codex-mailbox-watch.py
+# Copy to a local, untracked env file and adjust for your machine.
+
+AGENT_MAILBOX_DIR=/path/to/agent-mailbox
+
+# Command used to wake your external/Codex side.
+# Supported placeholders: {seq}, {inbox}, {outbox}, {turn}
+# Keep this local because Codex Desktop/CLI/automation differs by environment.
+CODEX_WAKE_COMMAND='echo "Codex turn {seq} waiting. Read {inbox}; write {outbox}; update {turn}."'
+
+CODEX_RETRY_AFTER_SECONDS=600
+CODEX_MAX_TRIGGER_ATTEMPTS=3
