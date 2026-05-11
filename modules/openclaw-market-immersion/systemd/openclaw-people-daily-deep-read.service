@@ -10,5 +10,5 @@ Type=oneshot
 WorkingDirectory=%h/.openclaw/workspace/market-immersion-module
 ExecStart=%h/.openclaw/workspace/market-immersion-module/scripts/run_people_daily_deep_read.sh
 TimeoutStartSec=21600
-Restart=on-failure
+Restart=no
 RestartSec=30min

@@ -1,11 +1,11 @@
 [Unit]
 Description=OpenClaw Market Immersion close run
-After=network-online.target openclaw-gateway.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-Restart=on-failure
+Restart=no
 RestartSec=2min
 RestartPreventExitStatus=3
 WorkingDirectory=%h/.openclaw/workspace/market-immersion-module

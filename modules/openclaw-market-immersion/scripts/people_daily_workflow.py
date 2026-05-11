@@ -25,6 +25,7 @@ from typing import Any
 WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(WORKSPACE_ROOT / "scripts"))
 import background_tasks  # noqa: E402
+from direct_provider_openclaw_compat import maybe_run_openclaw_agent_direct, run_openclaw_model_call  # noqa: E402
 
 from people_daily_deep_read import collect_issue, issue_date_from_layout_url, layout_url_for_date
 
@@ -43,6 +44,11 @@ def run_process_group(
     check: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command in its own process group and kill descendants on timeout."""
+    direct_completed = maybe_run_openclaw_agent_direct(cmd, timeout=timeout)
+    if direct_completed is not None:
+        if check and direct_completed.returncode != 0:
+            raise subprocess.CalledProcessError(direct_completed.returncode, cmd, output=direct_completed.stdout, stderr=direct_completed.stderr)
+        return direct_completed
     process = subprocess.Popen(
         cmd,
         text=text,
@@ -853,7 +859,7 @@ def run_openclaw_json_prompt(
         "--message",
         prompt,
     ]
-    completed = run_process_group(
+    completed = run_openclaw_model_call(
         cmd,
         text=True,
         capture_output=True,
@@ -962,7 +968,7 @@ def openclaw_article_analysis(
         "--message",
         prompt,
     ]
-    completed = run_process_group(
+    completed = run_openclaw_model_call(
         cmd,
         text=True,
         capture_output=True,
@@ -1053,7 +1059,7 @@ def openclaw_issue_overview(
         "--message",
         prompt,
     ]
-    completed = run_process_group(
+    completed = run_openclaw_model_call(
         cmd,
         text=True,
         capture_output=True,
@@ -2022,6 +2028,13 @@ def deliver_people_daily_link(*, config: dict[str, Any], manifest: dict[str, Any
     telegram = (pd_config.get("telegram") or config.get("telegram") or {})
     if not telegram.get("enabled"):
         return {"enabled": False, "attempted": False}
+    if os.environ.get("OPENCLAW_BACKGROUND_SILENT_TELEGRAM") == "1":
+        return {
+            "enabled": True,
+            "attempted": False,
+            "reason": "background_silent_telegram",
+            "provider": "suppressed",
+        }
     url = str(publication.get("url") or "").strip()
     if not url:
         return {"enabled": True, "attempted": False, "reason": "missing Notion url"}
@@ -2090,6 +2103,13 @@ def deliver_people_daily_status(
     telegram = (pd_config.get("telegram") or config.get("telegram") or {})
     if not telegram.get("enabled"):
         return {"enabled": False, "attempted": False}
+    if os.environ.get("OPENCLAW_BACKGROUND_SILENT_TELEGRAM") == "1":
+        return {
+            "enabled": True,
+            "attempted": False,
+            "reason": "background_silent_telegram",
+            "provider": "suppressed",
+        }
     target = str(telegram.get("target") or "").strip()
     if not target:
         return {"enabled": True, "attempted": False, "reason": "missing telegram target"}
@@ -2223,6 +2243,14 @@ def main() -> int:
                 artifacts=[output_root / issue_key / "manifest.json"],
                 needs_review=False,
             )
+            background_tasks.queue_notification(
+                background_task_id,
+                kind="people_daily_failed",
+                title=f"{issue_key} 人民日报深读校验失败",
+                summary=str(exc),
+                severity="warning",
+                artifact_paths=[output_root / issue_key / "manifest.json", checkpoint_dir / "validate.json"],
+            )
             raise
     print(f"issue={manifest['issue']['date']}")
     print(f"pages={len(manifest.get('pages') or [])}")
@@ -2322,6 +2350,14 @@ def main() -> int:
             artifacts=[report_path, output_root / issue_key / "manifest.json", error_path],
             needs_review=False,
         )
+        background_tasks.queue_notification(
+            background_task_id,
+            kind="people_daily_failed",
+            title=f"{issue_key} 人民日报深读未发布",
+            summary=str(exc),
+            severity="warning",
+            artifact_paths=[report_path, output_root / issue_key / "manifest.json", error_path],
+        )
         return 6
     write_workflow_checkpoint(
         output_root,
@@ -2359,12 +2395,28 @@ def main() -> int:
             artifacts=[report_path, output_root / issue_key / "manifest.json"],
             needs_review=False,
         )
+        background_tasks.queue_notification(
+            background_task_id,
+            kind="people_daily_delivery_failed",
+            title=f"{issue_key} 人民日报深读通知失败",
+            summary="Telegram Notion 链接通知失败，前序产物已生成。",
+            severity="warning",
+            artifact_paths=[report_path, output_root / issue_key / "manifest.json", checkpoint_dir / "notify.json"],
+        )
         return 7
     background_tasks.finish_task(
         background_task_id,
         artifacts=[report_path, output_root / issue_key / "manifest.json", checkpoint_dir / "publish.json", checkpoint_dir / "notify.json"],
         summary=f"{issue_key} 人民日报深读完成；Notion={result.get('url') or ''}",
         main_review_required=True,
+    )
+    background_tasks.queue_notification(
+        background_task_id,
+        kind="people_daily_completed",
+        title=f"{issue_key} 人民日报深读完成",
+        summary=f"Notion={result.get('url') or ''}",
+        severity="info",
+        artifact_paths=[report_path, output_root / issue_key / "manifest.json", checkpoint_dir / "publish.json", checkpoint_dir / "notify.json"],
     )
     return 0
 

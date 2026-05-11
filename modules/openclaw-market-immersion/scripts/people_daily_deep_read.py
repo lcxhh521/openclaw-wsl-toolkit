@@ -25,6 +25,11 @@ from pathlib import Path
 from typing import Any
 
 
+WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(WORKSPACE_ROOT / "scripts"))
+from direct_provider_openclaw_compat import run_openclaw_model_call  # noqa: E402
+
+
 USER_AGENT = "Mozilla/5.0 OpenClaw People Daily Deep Read"
 DEFAULT_BASE = "https://paper.people.com.cn/rmrb/pc"
 
@@ -271,7 +276,7 @@ def run_openclaw_analysis(
         prompt,
     ]
     started = dt.datetime.now().astimezone().isoformat(timespec="seconds")
-    completed = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout + 20, check=False)
+    completed = run_openclaw_model_call(cmd, text=True, capture_output=True, timeout=timeout + 20, check=False)
     analysis = completed.stdout.strip()
     try:
         payload = json.loads(completed.stdout)

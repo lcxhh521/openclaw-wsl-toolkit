@@ -3820,6 +3820,12 @@ def main() -> int:
         default="",
         help="Force rerun from this stage onward while reusing earlier manifest data",
     )
+    parser.add_argument(
+        "--stop-after",
+        choices=["digest", "quality_check", "render"],
+        default="",
+        help="Stop after this stage and do not publish or notify. Intended for safe recovery preflight.",
+    )
     args = parser.parse_args()
 
     script_dir = Path(__file__).resolve().parent
@@ -3922,6 +3928,7 @@ def main() -> int:
         except Exception:
             previous_manifest = {}
     force_from = args.from_stage or ""
+    stop_after = args.stop_after or ""
     stage_order = ["collect", "classify", "digest", "quality_check", "render", "publish", "notify"]
     dag_spec = {
         "mode": "background_dag",
@@ -4233,6 +4240,41 @@ def main() -> int:
         },
     )
 
+    if stop_after == "digest":
+        manifest = {
+            "version": 1,
+            "phase": args.phase,
+            "phase_label": run_def["label"],
+            "started_at": started_iso,
+            "run_slug": run_slug,
+            "attempt_slug": attempt_slug,
+            "window": window,
+            "config_path": str(config_path),
+            "checkpoints_dir": str(checkpoints_dir),
+            "dag": dag_spec,
+            "entries": entries,
+            "auxiliary_flow_checks": auxiliary_flow_checks,
+            "raw_flow_classification": raw_flow_classification,
+            "openclaw_summary": openclaw_digest,
+            "validation": {
+                "published": False,
+                "delivery_blocked": True,
+                "reason": "stopped after digest by operator recovery preflight",
+            },
+            "resume": {
+                "enabled": bool(args.resume or args.from_stage),
+                "from_stage": force_from or None,
+                "reused_manifest": str(manifest_path) if previous_manifest else None,
+            },
+            "stop_after": "digest",
+            "checkpoint": "digest_done_stop_after",
+        }
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"manifest={manifest_path}")
+        print(f"entries={len(entries)}")
+        print("stopped_after=digest")
+        return 0
+
     if openclaw_digest.get("degraded"):
         error_summary = "正式摘要生成失败；降级摘要只允许本地留痕，禁止 Notion 发布和 Telegram 推送。"
         manifest = {
@@ -4425,6 +4467,17 @@ def main() -> int:
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    if stop_after == "quality_check":
+        manifest["validation"]["delivery_blocked"] = True
+        manifest["validation"]["reason"] = "stopped after quality_check by operator recovery preflight"
+        manifest["stop_after"] = "quality_check"
+        manifest["checkpoint"] = "quality_check_done_stop_after"
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"manifest={manifest_path}")
+        print(f"entries={len(entries)}")
+        print("stopped_after=quality_check")
+        return 0
+
     write_markdown_report(
         path=report_path,
         phase=args.phase,
@@ -4446,6 +4499,19 @@ def main() -> int:
         "render",
         {"status": "done", "report_path": str(report_path), "latest_path": str(latest_path)},
     )
+
+    if stop_after == "render":
+        manifest["validation"]["delivery_blocked"] = True
+        manifest["validation"]["reason"] = "stopped after render by operator recovery preflight"
+        manifest["stop_after"] = "render"
+        manifest["checkpoint"] = "render_done_stop_after"
+        manifest["render"] = {"report_path": str(report_path), "latest_path": str(latest_path)}
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"report={report_path}")
+        print(f"manifest={manifest_path}")
+        print(f"entries={len(entries)}")
+        print("stopped_after=render")
+        return 0
 
     failures = [e for e in entries if e["returncode"] != 0]
     api_failures = [e for e in entries if not e["api_ok"]]
