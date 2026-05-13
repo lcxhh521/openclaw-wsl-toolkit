@@ -117,6 +117,7 @@ Windows
         |   |-- OpenClawMonitor.ico
         |   `-- README.md
         |-- openclaw-netwatch/
+        |-- wsl-safe/
         |   |-- openclaw-netwatch
         |   |-- openclaw-netwatch.service
         |   |-- openclaw-netwatch.timer
@@ -167,6 +168,12 @@ Use $openclaw-telegram-wsl-setup to follow the OpenClaw 养虾指南 on Windows 
 ```
 
 如果你已经在中文对话中调用它，skill 会继续使用中文；如果是新安装流程，它会先确认安装语言和关键选择。
+
+## WSL 安全命令入口
+
+`openclaw-telegram-wsl-setup/tools/wsl-safe/Invoke-WslSafe.ps1` 是 Windows 侧的轻量辅助脚本，用来把多行 Bash/Python 任务安全地送进 Ubuntu on WSL。它会把 CRLF/CR 统一成 LF，使用 UTF-8 no BOM 临时文件，避免 PowerShell 引号、换行和编码把 OpenClaw 维护脚本搅坏。
+
+它适合 Codex/OpenClaw 维护、状态检查、仓库同步、只读诊断等场景；不保存 secrets，默认清理临时文件。因为仓库里的 PowerShell 脚本通常未签名，手动运行时建议先用 `Install-InvokeWslSafe.ps1` 安装到 `%LOCALAPPDATA%\OpenClawWslTools\`，再用 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ...` 只对本次调用放行；不要依赖直接从 `\\wsl.localhost` 执行 ps1。涉及删除、重启、真实发送或配置写入时，仍然需要按任务本身取得用户授权。
 
 ## 本机 OpenClaw 控制中心
 

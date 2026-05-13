@@ -64,6 +64,15 @@ If the user confirms, begin the OpenClaw installation process. If WSL2/OpenClaw 
 
 For greenfield setup, standardize on **Ubuntu under WSL2**. This is the no-brainer path. Do not offer distro selection during normal installation. Use a different distro only when the user explicitly asks or an existing working OpenClaw install already lives there.
 
+When Codex or another Windows-side automation needs to send multi-line scripts into WSL, prefer the bundled safe runner. If the repo lives inside WSL, install the runner to a Windows-local path first with `Install-InvokeWslSafe.ps1`, because Windows can block direct ps1 execution from `\\wsl.localhost` paths:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File openclaw-telegram-wsl-setup\tools\wsl-safe\Install-InvokeWslSafe.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\OpenClawWslTools\Invoke-WslSafe.ps1" -CommandFile .\script.sh
+```
+
+This runner normalizes line endings to LF, writes UTF-8 without BOM, copies the script through `\\wsl.localhost\<Distro>\tmp\codex_wsl_safe\`, and executes it inside the selected distro. Use it for repeatable maintenance or diagnostics instead of hand-assembling complex PowerShell/WSL one-liners. It is not a permission bypass: destructive commands, restarts, sends, or config writes still require the same user approval as the underlying operation.
+
 Run these baseline Windows checks first:
 
 ```powershell
