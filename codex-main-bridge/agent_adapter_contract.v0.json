@@ -1,0 +1,70 @@
+{
+  "schema": "agent-adapter-contract.v0",
+  "created_at": "2026-05-13T22:02:00+08:00",
+  "purpose": "Define the minimum concrete adapter contract for OpenClaw multi-agent collaboration infrastructure.",
+  "global_rules": [
+    "OpenClaw main remains user-facing moderator, runtime-context owner, and acceptance gate.",
+    "External agents must be explicit participants with adapter status, permissions, artifacts, and blockers.",
+    "A participant is not considered integrated until probe/send/read have been demonstrated or a blocker is explicitly recorded.",
+    "No secrets/tokens may be read, copied, exported, or displayed by adapter probes.",
+    "No Telegram outbound, source edits, prompt/model/workflow changes, or external writes without explicit Alex approval."
+  ],
+  "status_values": [
+    "unprobed",
+    "probe_in_progress",
+    "active",
+    "waiting",
+    "stale",
+    "blocked",
+    "adapter_missing",
+    "transport_missing",
+    "auth_missing",
+    "manual_intervention_required",
+    "headless_supported",
+    "local_service_supported",
+    "gui_only_manual_required"
+  ],
+  "participant_fields": {
+    "id": "stable participant id",
+    "status": "candidate|active|blocked",
+    "adapter_status": "one of status_values",
+    "host": "wsl|windows|macos|remote|tbd",
+    "adapter": {
+      "kind": "mailbox|acp|cli|local_service|gui_automation|manual_bridge|unknown",
+      "probe_command": "optional read-only probe command or script path",
+      "send_command": "optional task send command or script path",
+      "read_command": "optional result read command or script path",
+      "cancel_command": "optional cancellation command or script path",
+      "artifact_root": "optional artifact output root"
+    },
+    "capabilities": {
+      "probe": false,
+      "send_task": false,
+      "read_result": false,
+      "cancel": false,
+      "resume": false,
+      "artifacts": false,
+      "structured_output": false,
+      "requires_gui": false,
+      "requires_manual_auth": false
+    },
+    "roles": ["reviewer|worker|moderator|user_facing_synthesis|protocol_design|implementation_review"],
+    "permissions": ["read_room|write_room|write_comments|inspect_local_artifacts|propose_changes"],
+    "approval_boundaries": ["no_source_edits", "no_telegram_outbound", "no_workflow_changes", "no_secrets"],
+    "blockers": []
+  },
+  "probe_result_fields": {
+    "participant_id": "string",
+    "checked_at": "ISO timestamp",
+    "adapter_status": "one of status_values",
+    "evidence": ["non-secret evidence strings"],
+    "blockers": ["exact blockers with remediation if known"],
+    "safe_next_actions": ["actions that remain within read-only/safe scope"],
+    "requires_alex_action": ["manual login/auth/install/window action if needed"]
+  },
+  "done_definition": {
+    "adapter_probe_done": "probe result exists with status and evidence",
+    "participant_integrated": "probe/send/read smoke succeeded with artifact path, or blocker is explicit and reproducible",
+    "agent_room_ready": "status classifier can report all participants without waking agents or sending Telegram"
+  }
+}

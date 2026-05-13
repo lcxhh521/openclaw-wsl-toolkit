@@ -20,31 +20,31 @@
     "base_url": "https://paper.people.com.cn/rmrb/pc",
     "output_dir": "~/.openclaw/workspace/people-daily-deep-read",
     "max_pages": 99,
-    "crawl_delay_seconds": 120,
+    "crawl_delay_seconds": 2,
     "timeout": 120,
     "analysis": {
       "enabled": true,
       "mode": "openclaw",
       "agent": "daily-writer",
       "model": "openai-codex/gpt-5.5",
-      "thinking": "medium",
+      "thinking": "high",
       "timeout": 300,
-      "parallelism": 5,
+      "parallelism": 1,
       "combined_call": true,
       "detailed_max_page_no": 4,
-      "prompt_template_path": "",
+      "prompt_template_path": "~/.openclaw/private-prompts/people_daily/article_analysis_v1.md",
       "required_prompt_id": "people_daily_article_combined_v1_2026-05-06",
       "full_analysis": {
-        "prompt_template_path": "",
+        "prompt_template_path": "~/.openclaw/private-prompts/people_daily/article_full_analysis_v1.md",
         "required_prompt_id": "people_daily_full_analysis_v1_2026-05-06"
       },
       "structured_groups": {
-        "prompt_template_path": "",
+        "prompt_template_path": "~/.openclaw/private-prompts/people_daily/article_structured_groups_v1.md",
         "required_prompt_id": "people_daily_structured_groups_v1_2026-05-06"
       },
       "overview": {
         "enabled": true,
-        "prompt_template_path": "",
+        "prompt_template_path": "~/.openclaw/private-prompts/people_daily/issue_overview_v1.md",
         "required_prompt_id": "people_daily_overview_v1_2026-05-06",
         "allow_deterministic_fallback": false
       },
@@ -57,7 +57,8 @@
       "finance_page_id": "",
       "people_daily_page_id": "",
       "timeout": 120,
-      "people_daily_page_id_env": "NOTION_PEOPLE_DAILY_PAGE_ID"
+      "people_daily_page_id_env": "NOTION_PEOPLE_DAILY_PAGE_ID",
+      "finance_page_id_env": "NOTION_FINANCE_PAGE_ID"
     }
   },
   "openclaw_summary": {
@@ -66,7 +67,7 @@
     "summarize_smoke": true,
     "agent": "daily-writer",
     "model": "openai-codex/gpt-5.5",
-    "thinking": "low",
+    "thinking": "high",
     "timeout": 300,
     "retries": 3,
     "max_item_chars": 0,
@@ -86,17 +87,23 @@
   },
   "raw_flow_quality_check": {
     "enabled": true,
+    "mode": "large_context",
     "agent": "ark-review",
-    "model": "volcengine-plan/glm-5.1",
+    "model": "kimi-k2.6",
     "thinking": "low",
-    "timeout": 180,
+    "timeout": 900,
+    "retries": 2,
+    "retry_wait": 90,
+    "provider_secrets_env": "~/.openclaw/secrets/volcengine.env",
+    "include_report_chars": 40000,
     "max_items": 0,
     "max_item_chars": 300,
     "max_message_chars": 50000,
     "role": "review_only_gpt_decides",
     "gpt_review_decision_enabled": true,
     "gpt_review_agent": "daily-writer",
-    "gpt_review_model": "openai-codex/gpt-5.5"
+    "gpt_review_model": "openai-codex/gpt-5.5",
+    "gpt_review_thinking": "high"
   },
   "pipeline": {
     "collection_parallelism": 4,
@@ -281,7 +288,8 @@
     "send_smoke": false,
     "timeout": 60,
     "delivery_method": "bot_api",
-    "retry_attempts": 4
+    "retry_attempts": 4,
+    "target_env": "OPENCLAW_MARKET_TELEGRAM_TARGET"
   },
   "runs": {
     "smoke": {

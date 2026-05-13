@@ -843,6 +843,8 @@ Key handling rules:
 - Store Notion credentials in `~/.openclaw/secrets/notion.env`.
 - The bundled `config/market_immersion_config.json` must remain portable: use `~/.openclaw/...` paths, leave user-specific Notion page IDs and Telegram targets blank, and keep Notion/Telegram publishing disabled until the user opts in.
 - When the user opts into Notion or Telegram publishing, update that user's installed config under `~/.openclaw/workspace/market-immersion-module/config/market_immersion_config.json`; do not commit their IDs or targets back to the repository.
+- Treat `model-inputs/` as prompt-transport infrastructure: repository may include the contract and placeholder manifest, but must not include real `*.prompt.txt`, raw market feeds, People's Daily article text, user conversations, model outputs, or run manifests.
+- Market daily prompt-building code may be tracked as part of the workflow. People's Daily deep-read prompt contents must stay private under `~/.openclaw/private-prompts/people_daily/`; repository docs and config may reference these private paths but must not contain the prompt wording.
 - Keep secret files mode `0600`.
 - Never print, log, screenshot, commit, or chat-paste secret values.
 - If a secret is exposed in chat, logs, screenshots, or command history, recommend rotating it.

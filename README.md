@@ -325,13 +325,25 @@ journalctl --user -u openclaw-market-immersion-morning.service -n 100 --no-pager
 模块现在把“数据源失效处理”和“禁止自动降级发布”分开写清楚：
 
 - `allow_degraded_publication` 默认并应保持为 `false`；缺源、跳过失败源或发布不完整日报都需要用户明确批准。
-- 每次抓取会生成 `source_health`，列出失败/窗口不足的数据源、错误原因、可用备用接口和建议动作。
+- 每次抓取会生成 `source_health`，列出失败/窗口不足的数据源、错误原因、可用备用接口和建议动作；该信息默认只留在 manifest/operator diagnostics，不进入用户可见日报，除非显式开启调试输出。
 - 备用方案不是高频本地快照，而是 `config/source_registry.json` 维护的当前主源接口注册表；公开仓库只发布当前主源，不发布额外备用接口候选。
-- `scripts/verify_source_interfaces.py` 会低频验证候选接口是否与官方网站展示一致；只有验证通过的候选才可作为 `backup_ready`。
+- `scripts/verify_source_interfaces.py` 会低频验证候选接口是否与官方网站展示一致；只有验证通过且不是当前 primary 的候选才可作为真正的 `backup_ready`。
 - `openclaw-source-interface-verification.timer` 默认每月 1 日和 16 日 07:05 CST 运行一次，用于常备验证，不发布日报、不替换主源。
-- 实际日报抓取始终主源优先；主源失败时才临时尝试已验证备用接口，下一轮主源恢复后自动切回主源。
+- 实际日报抓取始终主源优先；主源失败或窗口覆盖不足时，应先尝试已验证备用接口补齐/替代，下一轮主源恢复后自动切回主源。
+- 若没有已验证备用接口，不要把内部健康检查块混入正文；可以先发布一版**降级日报**，但格式必须与正常日报一致，只在开头用简短提示说明“本版暂未覆盖哪些源/时间窗口”。随后立即启动备用接口搜索/验证；找到可用替代源后，发布一版**缺失源补充简报**。
+- **缺失源补充简报**复用正常每日简讯流程和版式，但范围只限此前缺失源/缺失窗口：顶部要有“仅补充 X 版降级日报缺失的 Y 源/Z 时间段”说明；「信息汇总」不是全日/全市场判断，而是只对这部分补回信息做有边界的总结，不能推出超出缺失源范围的判断；「原始消息流」仍按正常信息流形式列出补回的全部原始信息。
 
 `openclaw-market-feed-snapshot.timer` 不作为默认方案启用；只有在主要接口失效且暂时找不到替代接口时，才可临时开启快照兜底。具体设计见 `modules/openclaw-market-immersion/docs/source_interface_failover.md`。
+
+### 大输入传输与 prompt 边界
+
+`model-inputs/` 是大模型输入传输机制的公开契约，不是运行数据目录。仓库只提交 `model-inputs/README.md` 和占位 manifest，用来说明大 prompt 如何以本地文件 + SHA-256 的方式交给模型通道读取。
+
+- 日报的 prompt 构建逻辑属于稳定工作流，可以随 `market_immersion.py` 同步。
+- 真实运行生成的 `*.prompt.txt`、原始信息流、模型输出、manifest 和审稿产物不进仓库。
+- 人民日报深读的具体解读 prompt 不随仓库发布；仓库只保留 `~/.openclaw/private-prompts/people_daily/` 私有路径约定、流程代码和 JSON 契约。
+- 如果需要示例，只提交 placeholder，不提交真实文章、日报信息流、用户对话或模型输入。
+
 
 ### 人民日报深读
 

@@ -138,10 +138,11 @@ def call_chat_completions(
     body = {
         "model": profile.default_model,
         "messages": messages,
-        "max_tokens": max_tokens,
         "temperature": temperature,
         "stream": False,
     }
+    if max_tokens and max_tokens > 0:
+        body["max_tokens"] = max_tokens
     request = urllib.request.Request(
         profile.base_url + profile.endpoint_path,
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -212,6 +213,7 @@ def run(args: argparse.Namespace) -> int:
         "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "prompt_chars": len(prompt),
         "system_chars": len(system),
+        "max_tokens_requested": args.max_tokens if args.max_tokens and args.max_tokens > 0 else None,
         "input_file": args.input_file or "",
         "contract_file": args.contract_file or "",
         "outputs": {

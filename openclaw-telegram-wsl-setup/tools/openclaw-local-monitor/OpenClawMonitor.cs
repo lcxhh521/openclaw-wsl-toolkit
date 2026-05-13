@@ -13,22 +13,47 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+using System.Runtime.InteropServices;
 
 namespace OpenClawLocalMonitor
 {
     static class Program
     {
+        internal const string InstanceMutexName = "Local\\OpenClawControlMonitor";
+        internal const string InstancePipeName = "OpenClawControlMonitor.Show";
+
         [STAThread]
         static void Main()
         {
             bool createdNew;
-            using (var mutex = new System.Threading.Mutex(true, "Local\\OpenClawControlMonitor", out createdNew))
+            using (var mutex = new System.Threading.Mutex(true, InstanceMutexName, out createdNew))
             {
-                if (!createdNew) return;
+                if (!createdNew)
+                {
+                    SignalExistingInstance();
+                    return;
+                }
 
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 Application.Run(new MonitorForm());
+            }
+        }
+
+        static void SignalExistingInstance()
+        {
+            try
+            {
+                using (var pipe = new NamedPipeClientStream(".", InstancePipeName, PipeDirection.Out))
+                using (var writer = new StreamWriter(pipe, Encoding.UTF8))
+                {
+                    pipe.Connect(800);
+                    writer.WriteLine("show");
+                    writer.Flush();
+                }
+            }
+            catch
+            {
             }
         }
     }
@@ -158,6 +183,9 @@ namespace OpenClawLocalMonitor
         public string RecentSessionAge = "-";
         public string StatusLine = "";
         public string Error = "";
+        public string ReliabilityStatus = "";
+        public string ReliabilitySummaryText = "";
+        public bool ExternalNetworkIssue;
         public long TokenTotal;
         public long TokenInput;
         public long TokenOutput;
@@ -181,6 +209,28 @@ namespace OpenClawLocalMonitor
         public readonly List<string> Sessions = new List<string>();
         public readonly List<string> Logs = new List<string>();
         public readonly List<string> TokenFlows = new List<string>();
+    }
+
+    sealed class LocalGatewayFacts
+    {
+        public bool ServiceActive;
+        public bool ProcessRunning;
+        public bool PortListening;
+        public string ServiceState = "";
+        public string Pid = "";
+        public string CpuPercent = "";
+        public string RssMb = "";
+        public string Uptime = "";
+        public string Error = "";
+    }
+
+    sealed class TelegramLocalSignal
+    {
+        public long LastOkAgeMs = -1;
+        public long LastFailureAgeMs = -1;
+        public string LastOkLine = "";
+        public string LastFailureLine = "";
+        public string Error = "";
     }
 
     sealed class DiagnosticsSnapshot
@@ -256,6 +306,7 @@ namespace OpenClawLocalMonitor
         public string GeneratedAt = "";
         public long AgeMs = -1;
         public string Summary = "";
+        public readonly List<string> Kinds = new List<string>();
         public readonly List<string> Lines = new List<string>();
     }
 
@@ -320,6 +371,7 @@ namespace OpenClawLocalMonitor
         Button openControlButton;
         NotifyIcon trayIcon;
         ContextMenuStrip trayMenu;
+        NamedPipeServerStream restorePipe;
         bool allowExit;
         bool trayNoticeShown;
         bool togglingOpenClaw;
@@ -374,6 +426,7 @@ namespace OpenClawLocalMonitor
                 await RefreshAsync();
             };
             FormClosing += OnFormClosing;
+            StartRestorePipe();
         }
 
         protected override void WndProc(ref Message m)
@@ -558,6 +611,31 @@ namespace OpenClawLocalMonitor
             trayIcon.DoubleClick += (s, e) => ShowFromTray();
         }
 
+        void StartRestorePipe()
+        {
+            Task.Run(() =>
+            {
+                while (!IsDisposed)
+                {
+                    try
+                    {
+                        using (var pipe = new NamedPipeServerStream(Program.InstancePipeName, PipeDirection.In, 1, PipeTransmissionMode.Message, PipeOptions.Asynchronous))
+                        {
+                            restorePipe = pipe;
+                            pipe.WaitForConnection();
+                            if (!IsDisposed)
+                                BeginInvoke(new Action(RestoreToForeground));
+                        }
+                    }
+                    catch
+                    {
+                        if (IsDisposed) return;
+                        System.Threading.Thread.Sleep(300);
+                    }
+                }
+            });
+        }
+
         void HideToTray()
         {
             Hide();
@@ -571,11 +649,41 @@ namespace OpenClawLocalMonitor
 
         void ShowFromTray()
         {
-            BeginSmoothRestore();
+            RestoreToForeground();
+        }
+
+        void RestoreToForeground()
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(RestoreToForeground));
+                return;
+            }
+
+            smoothRestorePending = false;
+            Opacity = 1;
             ShowInTaskbar = true;
-            WindowState = FormWindowState.Normal;
-            Show();
-            FinishSmoothRestore(true);
+            if (!Visible) Show();
+            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+            EnsureWindowOnScreen();
+            TopMost = true;
+            BringToFront();
+            Activate();
+            Focus();
+            TopMost = false;
+        }
+
+        void EnsureWindowOnScreen()
+        {
+            var current = Screen.FromControl(this).WorkingArea;
+            var visibleEnough = Bounds.IntersectsWith(current);
+            if (visibleEnough) return;
+
+            var area = Screen.PrimaryScreen.WorkingArea;
+            Width = Math.Min(Math.Max(Width, MinimumSize.Width), area.Width);
+            Height = Math.Min(Math.Max(Height, MinimumSize.Height), area.Height);
+            Left = area.Left + Math.Max(0, (area.Width - Width) / 2);
+            Top = area.Top + Math.Max(0, (area.Height - Height) / 2);
         }
 
         void OnMonitorResize()
@@ -599,7 +707,7 @@ namespace OpenClawLocalMonitor
         {
             if (smoothRestorePending) return;
             smoothRestorePending = true;
-            Opacity = 0;
+            Opacity = 1;
         }
 
         void FinishSmoothRestore(bool activate)
@@ -611,7 +719,7 @@ namespace OpenClawLocalMonitor
                 Update();
                 Opacity = 1;
                 smoothRestorePending = false;
-                if (activate) Activate();
+                if (activate) RestoreToForeground();
             }));
         }
 
@@ -721,10 +829,13 @@ namespace OpenClawLocalMonitor
             overall = new Card("状态", 28, 232, 176, 88);
             gateway = new Card("网关", 220, 232, 176, 88);
             telegram = new Card("Telegram", 412, 232, 176, 88);
-            tasks = new Card("后台活动", 604, 232, 176, 88);
+            tasks = new Card("后台待处理", 604, 232, 176, 88);
             audit = new Card("提醒", 796, 232, 176, 88);
             session = new Card("最近活动", 988, 232, 194, 88);
-            Controls.AddRange(new Control[] { overall.Panel, gateway.Panel, telegram.Panel, tasks.Panel, audit.Panel, session.Panel });
+            telegram.Panel.Visible = false;
+            Controls.AddRange(new Control[] { overall.Panel, gateway.Panel, tasks.Panel, audit.Panel, session.Panel });
+            AddCardHoverTip(gateway, "这里显示 gateway 进程 CPU。数值高会变慢，但不等于重启或不可用。");
+            AddCardHoverTip(tasks, "来自本地 task.json，统计未结束任务；不调用 gateway。");
 
             tokenHeader = MakeLabel("Token / 成本流向", 28, 344, 260, 24, 12f, Color.FromArgb(15, 23, 42), true);
             tokenHeader.Visible = false;
@@ -770,7 +881,7 @@ namespace OpenClawLocalMonitor
             taskGrid.Columns.Add("last", "最近事件");
             Controls.Add(taskGrid);
 
-            Controls.Add(MakeLabel("最近会话", 28, 692, 240, 24, 12f, Color.FromArgb(15, 23, 42), true));
+            Controls.Add(MakeLabel("Agent 活动", 28, 692, 240, 24, 12f, Color.FromArgb(15, 23, 42), true));
             sessionList = MakeList(28, 722, 560, 120);
             Controls.Add(sessionList);
 
@@ -798,9 +909,10 @@ namespace OpenClawLocalMonitor
             };
             hoverTipText = new Label
             {
-                Location = new Point(10, 8),
-                Size = new Size(160, 18),
-                AutoEllipsis = true,
+                Location = new Point(12, 9),
+                Size = new Size(156, 18),
+                AutoEllipsis = false,
+                TextAlign = ContentAlignment.MiddleLeft,
                 ForeColor = Color.FromArgb(51, 65, 85),
                 Font = new Font("Microsoft YaHei UI", 8.5f),
                 BackColor = Color.Transparent
@@ -816,13 +928,23 @@ namespace OpenClawLocalMonitor
             target.MouseLeave += (s, e) => HideBoundedHoverTip();
         }
 
+        void AddCardHoverTip(Card card, string text)
+        {
+            AddBoundedHoverTip(card.Panel, text);
+            foreach (Control child in card.Panel.Controls)
+                AddBoundedHoverTip(child, text);
+        }
+
         void ShowBoundedHoverTip(Control target, string text)
         {
             if (hoverTip == null || hoverTipText == null) return;
             hoverTipText.Text = text;
-            var measured = TextRenderer.MeasureText(text, hoverTipText.Font);
-            var width = Math.Min(Math.Max(measured.Width + 24, 150), Math.Max(150, ClientSize.Width - 56));
-            var height = 34;
+            var maxWidth = Math.Min(380, Math.Max(180, ClientSize.Width - 56));
+            var single = TextRenderer.MeasureText(text, hoverTipText.Font, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding);
+            var bodyWidth = Math.Min(Math.Max(single.Width, 132), maxWidth - 24);
+            var measured = TextRenderer.MeasureText(text, hoverTipText.Font, new Size(bodyWidth, int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
+            var width = Math.Min(maxWidth, Math.Max(156, measured.Width + 26));
+            var height = Math.Max(34, measured.Height + 20);
             var screenPoint = target.PointToScreen(new Point(0, target.Height + 8));
             var local = PointToClient(screenPoint);
             var x = Math.Max(28, Math.Min(local.X, ClientSize.Width - width - 28));
@@ -831,7 +953,7 @@ namespace OpenClawLocalMonitor
                 y = PointToClient(target.PointToScreen(new Point(0, -height - 8))).Y;
             y = Math.Max(28, y);
             hoverTip.SetBounds(x, y, width, height);
-            hoverTipText.SetBounds(10, 8, width - 20, 18);
+            hoverTipText.SetBounds(12, 9, width - 24, height - 18);
             hoverTip.Visible = true;
             hoverTip.BringToFront();
         }
@@ -894,8 +1016,8 @@ namespace OpenClawLocalMonitor
                     }
                 }
 
-                var topCards = new[] { overall, gateway, telegram, tasks, audit, session };
-                var topColumns = contentWidth >= 1060 ? 6 : 3;
+                var topCards = new[] { overall, gateway, tasks, audit, session };
+                var topColumns = contentWidth >= 1060 ? 5 : 3;
                 var topCardWidth = (contentWidth - gap * (topColumns - 1)) / topColumns;
                 var y = 232 + topExtra;
                 for (var i = 0; i < topCards.Length; i++)
@@ -1304,7 +1426,7 @@ namespace OpenClawLocalMonitor
                 var lastLog = GetValue(values, "last_log");
 
                 var isInstalled = installed == "yes";
-                d.NetworkStability.Add(new DiagnosticItem("Network Observer / Netwatch installed", isInstalled ? "yes" : "no", isInstalled ? "Good" : "Warn", isInstalled ? "控制中心可见；后台观察层已安装" : "尚未安装网络观察器；可通过 openclaw-netwatch 安装", "systemd/user files"));
+                d.NetworkStability.Add(new DiagnosticItem("Netwatch installed", isInstalled ? "yes" : "no", isInstalled ? "Good" : "Warn", isInstalled ? "控制中心可见；后台执行层已安装" : "尚未安装网络稳定性 watchdog；可通过 openclaw-netwatch 安装", "systemd/user files"));
 
                 if (!isInstalled) return;
 
@@ -1331,11 +1453,11 @@ namespace OpenClawLocalMonitor
 
                 if (!string.IsNullOrWhiteSpace(lastLog))
                 {
-                    d.NetworkStability.Add(new DiagnosticItem("Last Netwatch log", Trim(RedactSensitive(lastLog), 180), "Good", "最近网络观察事件", "~/.cache/openclaw-netwatch/watchdog.log"));
+                    d.NetworkStability.Add(new DiagnosticItem("Last netwatch log", Trim(RedactSensitive(lastLog), 180), "Good", "最近 watchdog 事件", "~/.cache/openclaw-netwatch/watchdog.log"));
                 }
                 else
                 {
-                    d.NetworkStability.Add(new DiagnosticItem("Last Netwatch log", "无记录", "Good", "尚无 Netwatch 日志", "~/.cache/openclaw-netwatch/watchdog.log"));
+                    d.NetworkStability.Add(new DiagnosticItem("Last netwatch log", "无记录", "Good", "尚无 watchdog 日志", "~/.cache/openclaw-netwatch/watchdog.log"));
                 }
             }
             catch (Exception ex)
@@ -2107,69 +2229,439 @@ namespace OpenClawLocalMonitor
 
         Snapshot BuildSnapshot()
         {
-            var probeTask = Task.Run(() => RunOpenClawJson(new[] { "gateway", "probe", "--json", "--timeout", "8000" }, 12000));
-            var channelStatusTask = Task.Run(() => RunOpenClawJson(new[] { "channels", "status", "--json", "--timeout", "8000" }, 10000));
-            Task.WaitAll(probeTask, channelStatusTask);
-
-            var probe = probeTask.Result;
-            var channelStatus = channelStatusTask.Result;
-            var openClawServiceActive = GatewayServiceLooksActive();
-
             var snapshot = new Snapshot();
-            snapshot.OpenClawServiceActive = probe.Item1 || channelStatus.Item1 || openClawServiceActive;
-            SetStartupProgress(snapshot, 0, "等待开启", "OpenClaw 未启动或正在等待检测。");
-            if (!probe.Item1)
-            {
-                gatewayProbeFailures++;
-                snapshot.Error = probe.Item3;
-                var serviceLooksAlive = channelStatus.Item1 || openClawServiceActive;
-                if (serviceLooksAlive && gatewayProbeFailures < 3)
-                {
-                    snapshot.State = "Degraded";
-                    snapshot.GatewayText = "探测慢";
-                    snapshot.GatewaySoftFailure = true;
-                    SetStartupProgress(snapshot, 35, "网关探测慢", "OpenClaw 服务仍在运行，但本轮 gateway probe 未在超时内完成。");
-                    snapshot.StatusLine = "OpenClaw 服务仍有响应；这不是重启证据。点“诊断”可看当前 PID、uptime 和 stability 记录。";
-                }
-                else
-                {
-                    snapshot.State = "Problem";
-                    snapshot.GatewayText = "未连接";
-                    SetStartupProgress(snapshot, 0, "网关未响应", "OpenClaw 尚未进入可用启动链路。");
-                    snapshot.StatusLine = string.IsNullOrWhiteSpace(probe.Item3) ? "OpenClaw 启动链路尚未连通。" : probe.Item3;
-                }
-            }
-            else
-            {
-                gatewayProbeFailures = 0;
-                FillFromProbe(snapshot, probe.Item2);
-            }
-            FillChannelStatus(snapshot, channelStatus.Item2);
-
-            if (ShouldUseStartupLightProbe(snapshot))
-            {
-                FillStartupLightPlaceholders(snapshot);
-                FillUsageCacheSnapshot(snapshot);
-                FillReliabilitySnapshot(snapshot);
-                if (!string.IsNullOrWhiteSpace(startupNote) && snapshot.GatewayOk)
-                    snapshot.StatusLine = startupNote + " | " + snapshot.StatusLine;
-                return snapshot;
-            }
-
-            FillSteadyLightPlaceholders(snapshot);
+            SetStartupProgress(snapshot, 100, "本地事实快照", "主面板只读 systemd、进程、端口、缓存和 task record。");
+            FillLocalGatewayFacts(snapshot);
+            FillTaskRecordsSnapshot(snapshot);
+            FillAgentEvidenceSnapshot(snapshot);
+            FinalizeMainPanelConnectivityState(snapshot);
             FillUsageCacheSnapshot(snapshot);
             FillReliabilitySnapshot(snapshot);
-            FillConversationActivity(snapshot);
-            FillTaskTableFallback(snapshot);
-            if (!string.IsNullOrWhiteSpace(startupNote) && snapshot.GatewayOk)
+
+            if (snapshot.Tasks.Count == 0)
+                snapshot.Tasks.Add(new[] { "本地 task record", "缓存", "无活动", "-", "未发现 running / cooling_down / awaiting_main_review 任务" });
+            if (string.IsNullOrWhiteSpace(snapshot.StatusLine))
+                snapshot.StatusLine = snapshot.OpenClawServiceActive
+                    ? "本地服务快照已更新；主面板未调用 gateway RPC。"
+                    : "未看到本地 OpenClaw gateway 服务运行。";
+            if (!string.IsNullOrWhiteSpace(startupNote))
                 snapshot.StatusLine = startupNote + " | " + snapshot.StatusLine;
             return snapshot;
         }
 
+        void FillLocalGatewayFacts(Snapshot s)
+        {
+            var facts = ReadLocalGatewayFacts();
+            s.OpenClawServiceActive = facts.ServiceActive || facts.ProcessRunning || facts.PortListening;
+            s.GatewayOk = facts.PortListening && (facts.ServiceActive || facts.ProcessRunning);
+            s.GatewaySoftFailure = s.OpenClawServiceActive && !s.GatewayOk;
+
+            if (s.GatewayOk)
+            {
+                gatewayProbeFailures = 0;
+                s.State = "Ready";
+                s.GatewayText = string.IsNullOrWhiteSpace(facts.CpuPercent)
+                    ? "在线"
+                    : "CPU " + facts.CpuPercent + "%";
+                s.StatusLine = "本地 gateway active，端口 18789 正在监听；网关卡片显示 gateway 进程 CPU，主面板未调用 gateway RPC。";
+                return;
+            }
+
+            if (s.OpenClawServiceActive)
+            {
+                gatewayProbeFailures++;
+                s.State = "Working";
+                s.GatewayText = facts.PortListening ? "端口监听" : "本地运行";
+                s.StatusLine = "控制中心只读到部分本地事实；这不等于 OpenClaw 不可用。";
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(facts.Error))
+            {
+                s.State = "Working";
+                s.GatewayText = "未确认";
+                s.GatewaySoftFailure = true;
+                s.StatusLine = "控制中心本地读取失败；不代表 OpenClaw 不可用：" + Trim(facts.Error, 100);
+                return;
+            }
+
+            s.State = "Problem";
+            s.GatewayText = "未发现";
+            s.StatusLine = "未看到 openclaw-gateway.service active、gateway 进程或 18789 监听端口。";
+        }
+
+        LocalGatewayFacts ReadLocalGatewayFacts()
+        {
+            var facts = new LocalGatewayFacts();
+            var errors = new List<string>();
+
+            var serviceResult = RunProcess("wsl.exe", new[] { "-d", WslDistro, "--", "bash", "-lc", "systemctl --user is-active openclaw-gateway.service 2>/dev/null || true" }, 3000);
+            if (serviceResult.Ok)
+                facts.ServiceState = serviceResult.Stdout.Trim();
+            else
+                errors.Add(serviceResult.Stderr + serviceResult.Error);
+            facts.ServiceActive = facts.ServiceState.Equals("active", StringComparison.OrdinalIgnoreCase);
+
+            var listenResult = RunProcess("wsl.exe", new[] { "-d", WslDistro, "--", "bash", "-lc", "ss -ltnp 2>/dev/null | grep -m1 ':18789' || true" }, 3000);
+            if (listenResult.Ok)
+            {
+                var listenLine = listenResult.Stdout.Trim();
+                facts.PortListening = listenLine.Length > 0;
+                var pidMatch = Regex.Match(listenLine, @"pid=(\d+)");
+                if (pidMatch.Success)
+                    facts.Pid = pidMatch.Groups[1].Value;
+            }
+            else
+            {
+                errors.Add(listenResult.Stderr + listenResult.Error);
+            }
+
+            if (string.IsNullOrWhiteSpace(facts.Pid))
+            {
+                var pidResult = RunProcess("wsl.exe", new[] { "-d", WslDistro, "--", "bash", "-lc", "pgrep -f 'openclaw.*/dist/index.js gateway --port 18789|openclaw-gateway' | head -1 || true" }, 3000);
+                if (pidResult.Ok)
+                    facts.Pid = pidResult.Stdout.Trim().Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
+                else
+                    errors.Add(pidResult.Stderr + pidResult.Error);
+            }
+
+            facts.ProcessRunning = Regex.IsMatch(facts.Pid ?? "", @"^\d+$");
+
+            if (facts.ProcessRunning)
+            {
+                var psResult = RunProcess("wsl.exe", new[] { "-d", WslDistro, "--", "bash", "-lc", "ps -p " + facts.Pid + " -o pid=,ppid=,pcpu=,rss=,etime=,args= 2>/dev/null | head -1" }, 3000);
+                if (psResult.Ok)
+                {
+                    var match = Regex.Match(psResult.Stdout.Trim(), @"^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(\S+)\s+(.+)$");
+                    if (match.Success)
+                    {
+                        facts.Pid = match.Groups[1].Value;
+                        facts.CpuPercent = match.Groups[3].Value;
+                        double rssKb;
+                        if (double.TryParse(match.Groups[4].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out rssKb))
+                            facts.RssMb = Math.Round(rssKb / 1024.0).ToString("0", CultureInfo.InvariantCulture);
+                        facts.Uptime = match.Groups[5].Value;
+                    }
+                }
+                else
+                {
+                    errors.Add(psResult.Stderr + psResult.Error);
+                }
+            }
+
+            if (!facts.ServiceActive && !facts.ProcessRunning && !facts.PortListening && errors.Count > 0)
+                facts.Error = RedactSensitive(string.Join(" ", errors));
+            return facts;
+        }
+
+        void FillTelegramLocalSignal(Snapshot s)
+        {
+            var signal = ReadTelegramLocalSignal();
+            if (!string.IsNullOrWhiteSpace(signal.Error))
+            {
+                s.TelegramText = "读取失败";
+                s.TelegramCardState = "warn";
+                s.Logs.Add("Telegram 本地观测读取失败：" + Trim(signal.Error, 100));
+                return;
+            }
+
+            var okRecent = signal.LastOkAgeMs >= 0 && signal.LastOkAgeMs <= 30L * 60L * 1000L;
+            var failRecent = signal.LastFailureAgeMs >= 0 && signal.LastFailureAgeMs <= 15L * 60L * 1000L;
+            var failureNewer = failRecent && (signal.LastOkAgeMs < 0 || signal.LastFailureAgeMs < signal.LastOkAgeMs);
+
+            if (okRecent && !failureNewer)
+            {
+                s.TelegramOk = true;
+                s.TelegramText = "最近已回复";
+                s.TelegramCardState = "good";
+                s.RecentSessionAge = Age(signal.LastOkAgeMs);
+                s.Tasks.Insert(0, new[] { "Telegram 回复", "本地日志", "已回复", Age(signal.LastOkAgeMs), "最近 sendMessage ok；未调用 gateway RPC" });
+                return;
+            }
+
+            if (failureNewer)
+            {
+                s.TelegramOk = false;
+                s.TelegramText = "最近失败";
+                s.TelegramCardState = "warn";
+                s.Tasks.Insert(0, new[] { "Telegram 回复", "本地日志", "需观察", Age(signal.LastFailureAgeMs), "最近 sendMessage/getMe 失败；看最近提醒" });
+                return;
+            }
+
+            if (signal.LastOkAgeMs >= 0)
+            {
+                s.TelegramText = "上次" + Age(signal.LastOkAgeMs);
+                s.TelegramCardState = "warn";
+                s.Tasks.Insert(0, new[] { "Telegram 回复", "本地日志", "无近期记录", Age(signal.LastOkAgeMs), "上次 sendMessage ok；主面板不主动测试 Telegram" });
+                return;
+            }
+
+            s.TelegramText = s.OpenClawServiceActive ? "无近期记录" : "-";
+            s.TelegramCardState = s.OpenClawServiceActive ? "warn" : "bad";
+        }
+
+        TelegramLocalSignal ReadTelegramLocalSignal()
+        {
+            var signal = new TelegramLocalSignal();
+            var script =
+                "log=/tmp/openclaw/openclaw-$(date +%F).log\n" +
+                "[ -r \"$log\" ] || exit 0\n" +
+                "grep -iE 'telegram sendMessage ok|telegram sendMessage failed|getMe|sendChatAction failed' \"$log\" 2>/dev/null | tail -120";
+            var result = RunProcess("wsl.exe", new[] { "-d", WslDistro, "--", "bash", "-lc", script }, 3000);
+            if (!result.Ok && string.IsNullOrWhiteSpace(result.Stdout))
+            {
+                signal.Error = RedactSensitive(result.Stderr + result.Error);
+                return signal;
+            }
+
+            foreach (var rawLine in (result.Stdout ?? "").Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var line = RedactSensitive(rawLine);
+                var ageMs = LogLineAgeMs(line);
+                if (line.IndexOf("telegram sendMessage ok", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    signal.LastOkAgeMs = ageMs;
+                    signal.LastOkLine = line;
+                }
+                else if (line.IndexOf("telegram sendMessage failed", StringComparison.OrdinalIgnoreCase) >= 0
+                    || line.IndexOf("sendChatAction failed", StringComparison.OrdinalIgnoreCase) >= 0
+                    || line.IndexOf("fetch timeout", StringComparison.OrdinalIgnoreCase) >= 0
+                    || line.IndexOf("getMe", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    signal.LastFailureAgeMs = ageMs;
+                    signal.LastFailureLine = line;
+                }
+            }
+            return signal;
+        }
+
+        long LogLineAgeMs(string line)
+        {
+            var match = Regex.Match(line ?? "", "\"time\"\\s*:\\s*\"([^\"]+)\"");
+            if (!match.Success) match = Regex.Match(line ?? "", "\"date\"\\s*:\\s*\"([^\"]+)\"");
+            if (!match.Success) return -1;
+            DateTimeOffset parsed;
+            if (DateTimeOffset.TryParse(match.Groups[1].Value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out parsed))
+                return (long)Math.Max(0, (DateTimeOffset.Now - parsed).TotalMilliseconds);
+            return -1;
+        }
+
+        void FillTaskRecordsSnapshot(Snapshot s)
+        {
+            var result = ReadTaskRecords();
+            if (!result.Item1)
+            {
+                s.Tasks.Add(new[] { "本地 task record", "本地文件", "读取失败", "-", Trim(result.Item3, 100) });
+                return;
+            }
+
+            var rows = AsList(result.Item2).Cast<object>().Select(item => AsDict(item)).ToList();
+            var active = 0;
+            foreach (var row in rows.Take(12))
+            {
+                var type = Convert.ToString(Get(row, "task_type") ?? Get(row, "task_id") ?? "任务");
+                var displayStatus = Convert.ToString(Get(row, "display_status") ?? Get(row, "status") ?? "");
+                var status = TaskRecordStatusLabel(displayStatus, Convert.ToString(Get(row, "error_kind") ?? ""));
+                var updatedAt = Convert.ToString(Get(row, "updated_at") ?? "");
+                var age = AgeSince(updatedAt);
+                var summary = Convert.ToString(Get(row, "result_summary") ?? "");
+                var next = Convert.ToString(Get(row, "next_action") ?? "");
+                var error = Convert.ToString(Get(row, "error_kind") ?? "");
+                var detail = !string.IsNullOrWhiteSpace(summary) ? summary : !string.IsNullOrWhiteSpace(error) ? error : next;
+                if (IsActiveTaskRecord(displayStatus))
+                    active++;
+                s.Tasks.Add(new[] { Trim(type, 42), "task record", status, age, Trim(detail, 110) });
+                if (s.LastSessionAgeMs < 0)
+                {
+                    var ageMs = AgeSinceMs(updatedAt);
+                    if (ageMs >= 0)
+                    {
+                        s.LastSessionAgeMs = ageMs;
+                        s.RecentSessionAge = Age(ageMs);
+                    }
+                }
+            }
+            s.RunningTasks = active;
+        }
+
+        Tuple<bool, object, string> ReadTaskRecords()
+        {
+            var script = "cd ~/.openclaw/workspace 2>/dev/null && python3 scripts/task_record.py list --limit 12";
+            var result = RunProcess("wsl.exe", new[] { "-d", WslDistro, "--", "bash", "-lc", script }, 5000);
+            if (!result.Ok) return Tuple.Create(false, (object)null, RedactSensitive(result.Stderr + result.Error));
+            try
+            {
+                return Tuple.Create(true, json.DeserializeObject(ExtractJsonValue(result.Stdout)), "");
+            }
+            catch (Exception ex)
+            {
+                return Tuple.Create(false, (object)null, "task record JSON 解析失败：" + ex.Message);
+            }
+        }
+
+        void FillAgentEvidenceSnapshot(Snapshot s)
+        {
+            var config = ReadOpenClawConfig();
+            if (!config.Item1)
+            {
+                s.Sessions.Add("Agent 活动读取失败：" + Trim(config.Item3, 90));
+                return;
+            }
+
+            var root = AsDict(config.Item2);
+            var agentsRoot = AsDict(Get(root, "agents"));
+            var agents = AsList(Get(agentsRoot, "list"));
+            if (agents.Count == 0)
+            {
+                s.Sessions.Add("未发现 agents.list。");
+                return;
+            }
+
+            var lines = new List<Tuple<long, string>>();
+            foreach (var item in agents.Cast<object>().Take(12))
+            {
+                var row = AsDict(item);
+                var id = Convert.ToString(Get(row, "id") ?? "");
+                if (string.IsNullOrWhiteSpace(id)) continue;
+                var model = AgentModelLabel(Get(row, "model"));
+                var prefix = id + (ToBool(Get(row, "default")) ? " · default" : "") + " · " + Trim(model, 34);
+                var evidence = ReadLatestAgentSessionEvidence(id);
+                if (!evidence.Item1)
+                {
+                    lines.Add(Tuple.Create(-1L, Trim(prefix + " · 无活动证据", 120)));
+                    continue;
+                }
+
+                var session = AsDict(evidence.Item2);
+                var status = Convert.ToString(Get(session, "status") ?? "");
+                var updatedMs = LatestSessionTimestampMs(session);
+                var age = updatedMs > 0 ? AgeSince(updatedMs) : "-";
+                var sessionModel = Convert.ToString(Get(session, "model") ?? "");
+                var statusLabel = AgentSessionStatusLabel(status);
+                var bits = prefix + " · " + statusLabel + (age != "-" ? " · " + age + "前" : "");
+                if (!string.IsNullOrWhiteSpace(sessionModel) && !model.Contains(sessionModel))
+                    bits += " · session模型 " + Trim(sessionModel, 24);
+                lines.Add(Tuple.Create(updatedMs, Trim(bits, 120)));
+            }
+            foreach (var line in lines.OrderByDescending(item => item.Item1))
+                s.Sessions.Add(line.Item2);
+        }
+
+        Tuple<bool, object, string> ReadOpenClawConfig()
+        {
+            var result = RunProcess("wsl.exe", new[] { "-d", WslDistro, "--", "bash", "-lc", "cat ~/.openclaw/openclaw.json 2>/dev/null" }, 4000);
+            if (!result.Ok || string.IsNullOrWhiteSpace(result.Stdout))
+                return Tuple.Create(false, (object)null, RedactSensitive(result.Stderr + result.Error));
+            try
+            {
+                return Tuple.Create(true, json.DeserializeObject(ExtractJsonObject(result.Stdout)), "");
+            }
+            catch (Exception ex)
+            {
+                return Tuple.Create(false, (object)null, "openclaw.json JSON 解析失败：" + ex.Message);
+            }
+        }
+
+        Tuple<bool, object, string> ReadLatestAgentSessionEvidence(string agentId)
+        {
+            if (!Regex.IsMatch(agentId ?? "", @"^[A-Za-z0-9_.-]+$"))
+                return Tuple.Create(false, (object)null, "");
+            var script = "cat ~/.openclaw/agents/" + ShellQuote(agentId) + "/sessions/sessions.json 2>/dev/null || true";
+            var result = RunProcess("wsl.exe", new[] { "-d", WslDistro, "--", "bash", "-lc", script }, 3000);
+            if (!result.Ok || string.IsNullOrWhiteSpace(result.Stdout))
+                return Tuple.Create(false, (object)null, "");
+            try
+            {
+                var parsed = json.DeserializeObject(ExtractJsonObject(result.Stdout));
+                var candidates = new List<Tuple<string, Dictionary<string, object>>>();
+                var dict = AsDict(parsed);
+                foreach (var entry in dict)
+                {
+                    var session = AsDict(entry.Value);
+                    if (session.Count > 0)
+                        candidates.Add(Tuple.Create(Convert.ToString(entry.Key) ?? "", session));
+                }
+                if (candidates.Count == 0)
+                {
+                    foreach (var item in AsList(parsed).Cast<object>())
+                    {
+                        var session = AsDict(item);
+                        if (session.Count > 0)
+                            candidates.Add(Tuple.Create(Convert.ToString(Get(session, "sessionKey") ?? Get(session, "id") ?? "") ?? "", session));
+                    }
+                }
+                if (candidates.Count == 0)
+                    return Tuple.Create(false, (object)null, "");
+                var latest = candidates.OrderByDescending(c => LatestSessionTimestampMs(c.Item2)).First();
+                return Tuple.Create(true, (object)latest.Item2, latest.Item1);
+            }
+            catch
+            {
+                return Tuple.Create(false, (object)null, "");
+            }
+        }
+
+        string AgentModelLabel(object modelObj)
+        {
+            var model = AsDict(modelObj);
+            if (model.Count > 0)
+                return Convert.ToString(Get(model, "primary") ?? Get(model, "id") ?? "-") ?? "-";
+            var text = Convert.ToString(modelObj ?? "");
+            return string.IsNullOrWhiteSpace(text) ? "-" : text;
+        }
+
+        string AgentSessionStatusLabel(string status)
+        {
+            var key = (status ?? "").Trim().ToLowerInvariant();
+            if (key == "running") return "运行中";
+            if (key == "timeout") return "超时";
+            if (key == "failed" || key == "error") return "失败";
+            if (key == "done" || key == "completed" || key == "complete") return "已完成";
+            if (string.IsNullOrWhiteSpace(status)) return "有活动记录";
+            return status;
+        }
+
+        static long LatestSessionTimestampMs(Dictionary<string, object> session)
+        {
+            foreach (var key in new[] { "updatedAt", "lastEventAt", "lastActiveAt", "createdAt" })
+            {
+                var raw = Get(session, key);
+                var number = ToLong(raw);
+                if (number > 0)
+                    return number < 10000000000L ? number * 1000L : number;
+                var text = Convert.ToString(raw ?? "");
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    DateTimeOffset parsed;
+                    if (DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out parsed))
+                        return parsed.ToUniversalTime().ToUnixTimeMilliseconds();
+                }
+            }
+            return -1;
+        }
+
+        static bool IsActiveTaskRecord(string status)
+        {
+            var key = (status ?? "").Trim().ToLowerInvariant();
+            return key == "running" || key == "queued" || key == "pending" || key == "cooling_down" || key == "awaiting_main_review" || key == "main_review";
+        }
+
+        string TaskRecordStatusLabel(string status, string errorKind)
+        {
+            var key = (status ?? "").Trim().ToLowerInvariant();
+            if (key == "awaiting_main_review" || key == "main_review") return "待主脑审核";
+            if (key == "cooling_down") return "冷却中";
+            if (key == "running") return string.IsNullOrWhiteSpace(errorKind) ? "运行中" : "状态未收敛";
+            if (key == "failed") return "失败";
+            if (key == "done" || key == "completed" || key == "complete") return "已完成";
+            if (key == "queued" || key == "pending") return "等待中";
+            return string.IsNullOrWhiteSpace(status) ? "-" : status;
+        }
+
         bool ShouldUseStartupLightProbe(Snapshot snapshot)
         {
-            if (!snapshot.GatewayOk) return true;
-            if (!snapshot.TelegramOk) return true;
+            if (!snapshot.GatewayOk) return !snapshot.OpenClawServiceActive;
+            if (!snapshot.TelegramOk) return snapshot.StartupProgress > 0 && snapshot.StartupProgress < 100;
             return snapshot.StartupProgress > 0 && snapshot.StartupProgress < 100;
         }
 
@@ -2276,6 +2768,45 @@ namespace OpenClawLocalMonitor
             s.StatusLine = url + " | Telegram " + s.TelegramText;
             if (!s.GatewayOk || (tgConfigured && !s.TelegramOk)) s.State = "Problem";
             if (s.GatewayOk && s.TelegramOk && s.State == "Idle") s.State = "Ready";
+        }
+
+        void FillFromGatewayStatus(Snapshot s, string statusText)
+        {
+            var text = RedactSensitive(statusText ?? "");
+            var running = Regex.IsMatch(text, @"Runtime:\s+running", RegexOptions.IgnoreCase);
+            var connectivityOk = Regex.IsMatch(text, @"Connectivity probe:\s+ok", RegexOptions.IgnoreCase);
+            var admin = Regex.IsMatch(text, @"Capability:\s+admin-capable", RegexOptions.IgnoreCase);
+            var listening = Regex.Match(text, @"Listening:\s*([^\r\n]+)", RegexOptions.IgnoreCase);
+            var target = listening.Success ? listening.Groups[1].Value.Trim() : "127.0.0.1:18789";
+
+            s.OpenClawServiceActive = running || s.OpenClawServiceActive;
+            s.GatewayOk = running && connectivityOk;
+            s.GatewaySoftFailure = running && !s.GatewayOk;
+            s.GatewayText = s.GatewayOk ? "本地可用" : running ? "服务运行" : "需检查";
+
+            if (s.GatewayOk)
+            {
+                SetStartupProgress(s, 55, "本地网关可用", "gateway status 显示本地 connectivity probe 正常，正在检查 Telegram 通道。");
+                s.StatusLine = target + " | 本地 gateway 正常" + (admin ? " | admin-capable" : "");
+            }
+            else if (running)
+            {
+                s.State = "Working";
+                SetStartupProgress(s, 100, "本地服务运行", "OpenClaw gateway 进程仍在；本轮 connectivity probe 未在超时内完成。");
+                s.StatusLine = "OpenClaw gateway 进程仍在；本轮轻探测超时，不等于服务不可用。";
+            }
+            else
+            {
+                s.State = "Problem";
+                SetStartupProgress(s, 0, "网关未运行", "未看到 Runtime: running。");
+                s.StatusLine = "OpenClaw gateway 未运行或状态不可读。";
+            }
+        }
+
+        void FinalizeMainPanelConnectivityState(Snapshot s)
+        {
+            if (s.GatewayOk && s.State == "Idle")
+                s.State = "Ready";
         }
 
         void FillChannelStatus(Snapshot s, object channelStatusObj)
@@ -2570,16 +3101,29 @@ namespace OpenClawLocalMonitor
             var age = reliability.AgeMs >= 0 ? Age(reliability.AgeMs) + "前" : "-";
             var statusLabel = ReliabilityStatusLabel(reliability.Status);
             var line = "可靠性 · " + statusLabel + " · " + Trim(reliability.Summary, 96) + " · " + age;
+            s.ReliabilityStatus = reliability.Status;
+            s.ReliabilitySummaryText = reliability.Summary;
+            s.ExternalNetworkIssue = reliability.Kinds.Any(IsExternalNetworkReliabilityKind);
             s.Logs.Insert(0, line);
             foreach (var detail in reliability.Lines.Take(3).Reverse())
                 s.Logs.Insert(1, "  " + detail);
 
-            if (reliability.Status == "risk" && s.State != "Problem")
-                s.State = "Degraded";
+            var liveEntranceConfirmed = s.GatewayOk && s.TelegramOk;
             if ((reliability.Status == "risk" || reliability.Status == "warn") && string.IsNullOrWhiteSpace(s.StatusLine))
-                s.StatusLine = "最近有可靠性事件；控制中心已从本地 observer 缓存读取原因。";
+                s.StatusLine = liveEntranceConfirmed
+                    ? "当前 gateway 和 Telegram 已确认；最近可靠性事件只作为提醒显示。"
+                    : "最近有可靠性事件；控制中心已从本地 observer 缓存读取原因。";
             else if (reliability.Stale && string.IsNullOrWhiteSpace(s.StatusLine))
                 s.StatusLine = "可靠性 observer 缓存较旧；主面板仍保持只读缓存模式。";
+        }
+
+        bool IsExternalNetworkReliabilityKind(string kind)
+        {
+            var key = (kind ?? "").Trim().ToLowerInvariant();
+            return key == "network_or_provider_failure"
+                || key == "telegram_delivery_failed"
+                || key == "telegram_processing_failed"
+                || key == "telegram_action_failed";
         }
 
         ReliabilitySummary ReadReliabilitySummary()
@@ -2610,6 +3154,7 @@ namespace OpenClawLocalMonitor
                     var at = Convert.ToString(Get(row, "at") ?? "");
                     var ageMs = ToLong(Get(row, "ageMs"));
                     var eventAge = ageMs >= 0 ? Age(ageMs) + "前" : (string.IsNullOrWhiteSpace(at) ? "-" : at);
+                    if (!string.IsNullOrWhiteSpace(kind)) summary.Kinds.Add(kind);
                     summary.Lines.Add(ReliabilityKindLabel(kind) + " · " + Trim(eventSummary, 88) + " · " + eventAge);
                 }
 
@@ -3039,6 +3584,47 @@ namespace OpenClawLocalMonitor
             return text.Substring(start);
         }
 
+        static string ExtractJsonValue(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return "{}";
+            var objectStart = text.IndexOf('{');
+            var arrayStart = text.IndexOf('[');
+            var start = objectStart >= 0 && arrayStart >= 0 ? Math.Min(objectStart, arrayStart) : Math.Max(objectStart, arrayStart);
+            if (start < 0) return text;
+            var opener = text[start];
+            var closer = opener == '[' ? ']' : '}';
+            var depth = 0;
+            var inString = false;
+            var escape = false;
+            for (var i = start; i < text.Length; i++)
+            {
+                var ch = text[i];
+                if (escape)
+                {
+                    escape = false;
+                    continue;
+                }
+                if (ch == '\\' && inString)
+                {
+                    escape = true;
+                    continue;
+                }
+                if (ch == '"')
+                {
+                    inString = !inString;
+                    continue;
+                }
+                if (inString) continue;
+                if (ch == opener) depth++;
+                else if (ch == closer)
+                {
+                    depth--;
+                    if (depth == 0) return text.Substring(start, i - start + 1);
+                }
+            }
+            return text.Substring(start);
+        }
+
         Tuple<bool, string, string> RunWorkspaceActivity()
         {
             var script =
@@ -3050,7 +3636,7 @@ namespace OpenClawLocalMonitor
                 "emit_service() { name=\"$1\"; unit=\"$2\"; systemctl --user cat \"$unit\" >/dev/null 2>&1 || return; active=$(systemctl --user is-active \"$unit\" 2>/dev/null || true); sub=$(systemctl --user show \"$unit\" -p SubState --value 2>/dev/null | head -1); pid=$(systemctl --user show \"$unit\" -p MainPID --value 2>/dev/null | head -1); since=$(systemctl --user show \"$unit\" -p ActiveEnterTimestamp --value 2>/dev/null | head -1); since_s=$(date -d \"$since\" +%s 2>/dev/null || echo 0); now_s=$(date +%s); age_s=0; [ \"$since_s\" -gt 0 ] 2>/dev/null && age_s=$((now_s-since_s)); last=$(journalctl --user -u \"$unit\" -n 1 --no-pager -o short-iso 2>/dev/null | cut -c1-180); case \"$active\" in active|activating|deactivating|failed) printf 'SERVICE\\t%s\\t%s/%s\\t%s\\t%s\\t%s\\t%s\\n' \"$name\" \"$active\" \"$sub\" \"$unit\" \"$pid\" \"$age_s\" \"$last\";; esac; }\n" +
                 "pidfile=\"memory/continuous-task-status/steinsgate-kurisu.pid\"; [ -f \"$pidfile\" ] && emit_pid \"\u5b66\u4e60 daemon\" \"$(tr -dc '0-9' < \"$pidfile\" 2>/dev/null)\"\n" +
                 "ps -eo pid=,etime=,pcpu=,stat=,args= | grep -E 'continuous_learning_daemon\\.py|steinsgate_visible_supervisor\\.py|market_immersion\\.py|run_market_immersion\\.sh|people_daily_workflow\\.py|run_people_daily_deep_read\\.sh|market_feed_snapshot\\.py|openclaw-message|rapidocr|paddleocr|tesseract' | grep -v -E 'grep -E|OpenClawMonitor|systemctl --user|journalctl --user|ps -eo pid=' | while read -r pid etime cpu stat args; do role=$(role_for_args \"$args\"); emit_proc \"$role\" \"$pid\" \"$etime\" \"$cpu\" \"$stat\" \"$args\"; done\n" +
-                "emit_service \"OpenClaw Network Observer / Netwatch\" openclaw-netwatch.service\n" +
+                "emit_service \"OpenClaw \u7f51\u7edc watchdog\" openclaw-netwatch.service\n" +
                 "emit_service \"\u6bcf\u65e5\u5feb\u8baf morning\" openclaw-market-immersion-morning.service\n" +
                 "emit_service \"\u6bcf\u65e5\u5feb\u8baf midday\" openclaw-market-immersion-midday.service\n" +
                 "emit_service \"\u6bcf\u65e5\u5feb\u8baf close\" openclaw-market-immersion-close.service\n" +
@@ -3263,8 +3849,6 @@ namespace OpenClawLocalMonitor
             lastGatewayOk = s.GatewayOk;
             lastOpenClawServiceActive = s.OpenClawServiceActive;
             UpdateOpenClawPowerUi();
-            telegram.Value.Text = s.TelegramText;
-            SetCard(telegram, s.TelegramCardState);
             var registeredWork = Math.Max(s.RunningTasks, s.FlowActive);
             var backgroundTotal = registeredWork + s.FlowBlocked + s.FlowCancelRequested + s.LocalWorkItems;
             tasks.Value.Text = backgroundTotal.ToString();
@@ -3308,26 +3892,36 @@ namespace OpenClawLocalMonitor
 
         string HeroTitle(Snapshot s)
         {
-            if (s.State == "Problem") return "需要处理";
-            if (s.State == "Degraded") return "OpenClaw 需观察";
-            if (s.State == "Working") return "OpenClaw 正在工作";
-            if (s.State == "Ready") return "OpenClaw 已就绪";
-            return "OpenClaw 当前安静";
+            if (s.State == "Problem") return "OpenClaw 不可用";
+            if (s.State == "Degraded" && s.GatewaySoftFailure) return "OpenClaw 运行中";
+            if (s.State == "Degraded" && s.GatewayOk) return "OpenClaw 可用";
+            if (s.State == "Degraded") return "OpenClaw 需检查";
+            if (s.State == "Working" && s.GatewaySoftFailure) return "OpenClaw 运行中";
+            if (s.State == "Working") return "OpenClaw 可用";
+            if (s.State == "Ready") return "OpenClaw 可用";
+            return "OpenClaw 未确认";
         }
 
         string HeroDetail(Snapshot s)
         {
             if (s.State == "Problem")
             {
-                if (!s.GatewayOk) return "控制中心连不上网关。请检查 WSL 或 OpenClaw gateway。";
+                if (!s.OpenClawServiceActive) return "未看到本地 gateway 服务、进程或端口；如果 Telegram 仍可用，请点“诊断”核对。";
+                if (!s.GatewayOk) return "控制中心只读到部分本地 gateway 事实；不代表 OpenClaw 不可用。";
                 if (!s.TelegramOk) return "网关可连接，但 Telegram 未连接或未配置。";
                 if (s.AuditErrors > 0) return "任务审计有错误。请查看提醒和日志。";
                 return "有项目需要处理。";
             }
-            if (s.State == "Degraded") return "OpenClaw 服务仍有响应，但本轮轻量探测没有完全收敛；这不等于 gateway 已重启。";
-            if (s.State == "Working") return "检测到 OpenClaw 注册任务、活跃 TaskFlow、仍在运行的本地 daemon，或连续刷新之间的新产物写入。可以在下方表格看进展。";
-            if (s.State == "Ready") return "网关和 Telegram 已连接；后台没有 queued/running 任务、活跃 TaskFlow 或仍在运行的本地 daemon。";
-            return "后台没有 queued/running 任务、活跃 TaskFlow 或仍在运行的本地 daemon。";
+            if (s.State == "Degraded")
+            {
+                if (s.GatewaySoftFailure) return "本地服务在运行；本轮轻探测没有完整返回。";
+                if (s.ExternalNetworkIssue && s.GatewayOk) return "本地 Gateway 可用；最近请求失败已放入提醒，不代表当前不可用。";
+                return "有项目需要查看；点“诊断”看具体原因。";
+            }
+            if (s.State == "Working" && s.GatewaySoftFailure) return "本地服务在运行；本轮轻探测超时。";
+            if (s.State == "Working") return "本地 Gateway 可用；后台有活动正在运行。";
+            if (s.State == "Ready") return "本地 Gateway 可用；Telegram 端到端状态请看诊断或最近提醒。";
+            return "还没有完成可用性检查。";
         }
 
         Color HeroColor(Snapshot s)
@@ -3341,11 +3935,11 @@ namespace OpenClawLocalMonitor
 
         string DisplayState(string state)
         {
-            if (state == "Problem") return "需要处理";
-            if (state == "Degraded") return "需观察";
-            if (state == "Working") return "正在工作";
-            if (state == "Ready") return "就绪";
-            return "空闲";
+            if (state == "Problem") return "不可用";
+            if (state == "Degraded") return "需检查";
+            if (state == "Working") return "可用";
+            if (state == "Ready") return "可用";
+            return "未确认";
         }
 
         static string TranslateTaskStatus(string status)
@@ -3382,7 +3976,7 @@ namespace OpenClawLocalMonitor
 
         void AddCostHint()
         {
-            const string text = "离线估算，约每 10 分钟更新。";
+            const string text = "本自然月累计，月初清零；离线估算约每 10 分钟更新。";
             var info = new InfoBadge
             {
               Location = new Point(86, 12),
@@ -3515,6 +4109,20 @@ namespace OpenClawLocalMonitor
             if (epochMs <= 0) return "-";
             var dt = DateTimeOffset.FromUnixTimeMilliseconds(epochMs).LocalDateTime;
             return Age((long)Math.Max(0, (DateTime.Now - dt).TotalMilliseconds));
+        }
+
+        static string AgeSince(string timestamp)
+        {
+            var ageMs = AgeSinceMs(timestamp);
+            return ageMs >= 0 ? Age(ageMs) : "-";
+        }
+
+        static long AgeSinceMs(string timestamp)
+        {
+            if (string.IsNullOrWhiteSpace(timestamp)) return -1;
+            DateTimeOffset parsed;
+            if (!DateTimeOffset.TryParse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out parsed)) return -1;
+            return (long)Math.Max(0, (DateTimeOffset.Now - parsed.ToLocalTime()).TotalMilliseconds);
         }
 
         static long MillisecondsSince(long epochMs)

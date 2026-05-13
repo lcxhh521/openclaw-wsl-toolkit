@@ -116,6 +116,7 @@ def run_direct_provider_text_prompt(
         "model": direct_model,
         "prompt_chars": len(prompt or ""),
         "system_chars": len(system or ""),
+        "max_tokens_requested": max_tokens if max_tokens and max_tokens > 0 else None,
         "router_decision": router_decision,
         "outputs": {
             "manifest": str(output / "manifest.json"),

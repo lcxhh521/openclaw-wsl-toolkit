@@ -1,0 +1,9 @@
+{
+  "transport": "workspace_prompt_artifact_v1",
+  "created_at": "YYYY-MM-DDTHH:MM:SS+08:00",
+  "session_id": "example-run-id",
+  "prompt_path": "/home/<user>/.openclaw/workspace/model-inputs/native-prompt-transport/example/<sha>.prompt.txt",
+  "sha256": "<sha256-of-runtime-prompt>",
+  "chars": 0,
+  "payload": "placeholder only; do not commit real prompt text or source information flow"
+}

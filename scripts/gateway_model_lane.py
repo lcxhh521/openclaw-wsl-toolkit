@@ -21,7 +21,7 @@ from typing import TextIO
 WORKSPACE = Path(os.environ.get("OPENCLAW_WORKSPACE") or Path(__file__).resolve().parents[1])
 STATE_DIR = WORKSPACE / "state"
 LOCK_PATH = STATE_DIR / "gateway-model-lane.lock"
-DEFAULT_WAIT_SECONDS = int(os.environ.get("OPENCLAW_BG_MODEL_LANE_WAIT_SECONDS") or "45")
+DEFAULT_WAIT_SECONDS = int(os.environ.get("OPENCLAW_BG_MODEL_LANE_WAIT_SECONDS") or "600")
 DEFAULT_PROBE_SECONDS = float(os.environ.get("OPENCLAW_BG_MODEL_GATEWAY_PROBE_SECONDS") or "3")
 BUSY_RETURN_CODE = 75
 

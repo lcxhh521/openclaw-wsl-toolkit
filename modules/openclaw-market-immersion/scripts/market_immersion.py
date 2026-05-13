@@ -32,6 +32,7 @@ from typing import Any
 WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(WORKSPACE_ROOT / "scripts"))
 import background_tasks  # noqa: E402
+from direct_provider_openclaw_compat import maybe_run_openclaw_agent_direct, run_openclaw_model_call  # noqa: E402
 
 
 DEFAULT_SOURCE_ALTERNATIVES: dict[str, list[str]] = {
@@ -49,6 +50,8 @@ DEFAULT_SOURCE_ALTERNATIVES: dict[str, list[str]] = {
 SOURCE_INTERFACE_VERIFICATION_LATEST = (
     WORKSPACE_ROOT / "market-immersion" / "source-interface-verification" / "latest.json"
 )
+SOURCE_REGISTRY_PATH = Path(__file__).resolve().parents[1] / "config" / "source_registry.json"
+
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -56,8 +59,23 @@ def load_json(path: Path) -> dict[str, Any]:
         return json.load(f)
 
 
+def source_registry_primary_by_name(path: Path | None = None) -> dict[str, str]:
+    registry_path = path or SOURCE_REGISTRY_PATH
+    try:
+        registry = load_json(registry_path)
+    except Exception:
+        return {}
+    mapping: dict[str, str] = {}
+    for source in registry.get("sources") or []:
+        name = str(source.get("name") or "").strip()
+        primary = str(source.get("primary") or "").strip()
+        if name and primary:
+            mapping[name] = primary
+    return mapping
+
 def load_latest_source_interface_verification(path: Path | None = None) -> dict[str, Any]:
     latest_path = path or SOURCE_INTERFACE_VERIFICATION_LATEST
+    primary_by_name = source_registry_primary_by_name()
     try:
         latest = load_json(latest_path)
         report_path = Path(str(latest.get("report") or "")).expanduser()
@@ -72,7 +90,10 @@ def load_latest_source_interface_verification(path: Path | None = None) -> dict[
             name = str(row.get("source_name") or row.get("source_id") or "")
             if not name:
                 continue
-            ready[name] = [str(item) for item in row.get("backup_ready_candidates") or []]
+            primary = primary_by_name.get(name)
+            candidates = [str(item) for item in row.get("backup_ready_candidates") or []]
+            # A verified primary endpoint is not a backup/failover interface.
+            ready[name] = [item for item in candidates if item and item != primary]
             statuses[name] = str(row.get("status") or "")
         return {
             "available": True,
@@ -224,6 +245,11 @@ def run_process_group(
     check: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command in its own process group and kill the whole group on timeout."""
+    direct_completed = maybe_run_openclaw_agent_direct(cmd, timeout=timeout)
+    if direct_completed is not None:
+        if check and direct_completed.returncode != 0:
+            raise subprocess.CalledProcessError(direct_completed.returncode, cmd, output=direct_completed.stdout, stderr=direct_completed.stderr)
+        return direct_completed
     process = subprocess.Popen(
         cmd,
         text=text,
@@ -262,7 +288,9 @@ def classify_failure(error_text: str, *, default: str = "unknown_failure") -> st
         return default
     if "timeoutexpired" in lowered or "timed out after" in lowered:
         return "summary_timeout"
-    if looks_like_gateway_timeout(error_text):
+    if "gateway_model_lane_busy" in lowered:
+        return "gateway_model_lane_busy"
+    if "gateway_unreachable_before_model_call" in lowered or looks_like_gateway_timeout(error_text):
         return "gateway_unavailable"
     if "notion" in lowered and ("validation" in lowered or "invalid" in lowered or "body failed validation" in lowered):
         return "notion_validation_error"
@@ -276,6 +304,7 @@ def sanitize_user_reason(reason: str) -> str:
     messages = {
         "summary_timeout": "收盘报摘要生成超时，已停止本轮刷屏式重试，稍后由 supervisor 自动补跑。",
         "gateway_unavailable": "收盘报暂时无法连接本地 OpenClaw Gateway，已停止刷屏式重试，稍后自动补跑。",
+        "gateway_model_lane_busy": "后台模型通道正忙，已延后本轮摘要生成，稍后自动补跑。",
         "notion_validation_error": "收盘报 Notion 内容校验失败，已停止自动重试，等待修正。",
         "provider_timeout": "收盘报数据源或模型调用超时，已停止本轮刷屏式重试，稍后自动补跑。",
     }
@@ -294,6 +323,13 @@ def sanitize_user_reason(reason: str) -> str:
         if len(cleaned_lines) >= 2:
             break
     return "；".join(cleaned_lines) or "每日快讯简报失败，已记录技术日志。"
+
+
+def failure_notification_status(reason: str) -> str:
+    reason_text = str(reason or "")
+    if classify_failure(reason_text) == "gateway_model_lane_busy" or "后台模型通道" in reason_text:
+        return "delayed"
+    return "failed"
 
 
 def transient_retry_sleep(error_text: str, attempt: int) -> None:
@@ -2273,6 +2309,19 @@ def generate_raw_flow_quality_check(
         return {"enabled": True, "attempted": False, "reason": "missing items or GPT digest"}
     if not use_model:
         return {"enabled": True, "attempted": False, "reason": "model disabled for dry-run/smoke"}
+    if str(check_config.get("mode") or "large_context").strip() == "large_context":
+        return generate_raw_flow_quality_check_large_context(
+            config=config,
+            run_slug=run_slug,
+            check_config=check_config,
+        )
+    return generate_raw_flow_quality_check_artifact(
+        config=config,
+        items=items,
+        openclaw_digest=openclaw_digest,
+        run_slug=run_slug,
+        check_config=check_config,
+    )
     started_at = now_local()
     openclaw_bin = Path(config.get("openclaw_bin") or "openclaw").expanduser()
     model = str(check_config.get("model") or "volcengine-plan/glm-5.1")
@@ -2373,11 +2422,187 @@ def generate_raw_flow_quality_check(
         return {"enabled": True, "attempted": True, "provider": "ark", "model": model, "model_started_at": started_at.isoformat(timespec="seconds"), "model_completed_at": completed_at.isoformat(timespec="seconds"), "model_duration_ms": int((completed_at - started_at).total_seconds() * 1000), "error": str(exc)}
 
 
+def day_from_run_slug(run_slug: str) -> str:
+    yyyymmdd = run_slug.split("_", 1)[0]
+    return f"{yyyymmdd[0:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:8]}"
+
+
+def generate_raw_flow_quality_check_large_context(
+    *,
+    config: dict[str, Any],
+    run_slug: str,
+    check_config: dict[str, Any],
+) -> dict[str, Any]:
+    """Run Kimi/Ark large-context advisory QC as the production default.
+
+    This replaces the legacy GLM chunk/session QC path.  It is intentionally
+    advisory/non-blocking: failures are surfaced as warnings, never as a reason
+    to block a completed GPT digest from rendering/publishing.
+    """
+    started_at = now_local()
+    model = str(check_config.get("model") or "kimi-k2.6")
+    timeout = int(check_config.get("timeout") or 900)
+    retries = int(check_config.get("retries") or 2)
+    retry_wait = int(check_config.get("retry_wait") or 90)
+    raw_max_tokens = check_config.get("max_output_tokens", check_config.get("max_tokens"))
+    max_tokens = int(raw_max_tokens) if raw_max_tokens not in (None, "") else 0
+    include_report_chars = int(check_config.get("include_report_chars") or 40000)
+    runner_timeout = int(check_config.get("runner_timeout") or (timeout * (retries + 1) + retry_wait * retries + 180))
+
+    script = WORKSPACE_ROOT / "market-immersion" / "qc-v3" / "ark_qc_v3_large_context.py"
+    day = day_from_run_slug(run_slug)
+    checkpoint_file = WORKSPACE_ROOT / "market-immersion" / "daily" / day / "checkpoints" / run_slug / "quality_check_v3_large_context.json"
+    advisory_file = WORKSPACE_ROOT / "market-immersion" / "qc-v3" / run_slug / "large_context_advisory.json"
+    if not script.exists():
+        completed_at = now_local()
+        return {
+            "enabled": True,
+            "attempted": True,
+            "provider": "ark",
+            "mode": "large_context",
+            "model": model,
+            "model_started_at": started_at.isoformat(timespec="seconds"),
+            "model_completed_at": completed_at.isoformat(timespec="seconds"),
+            "model_duration_ms": int((completed_at - started_at).total_seconds() * 1000),
+            "error": f"large-context QC script missing: {script}",
+            "checkpoint_file": str(checkpoint_file),
+        }
+
+    env = os.environ.copy()
+    env.setdefault("OPENCLAW_WORKSPACE", str(WORKSPACE_ROOT))
+    provider_secrets_env = str(check_config.get("provider_secrets_env") or "~/.openclaw/secrets/volcengine.env").strip()
+    if provider_secrets_env:
+        for key, value in load_env_file(Path(provider_secrets_env).expanduser()).items():
+            env.setdefault(key, value)
+    env["MARKET_QC_RUN_SLUG"] = run_slug
+    env["ARK_QC_V3_MODEL"] = model
+    env["ARK_QC_V3_TIMEOUT"] = str(timeout)
+    env["ARK_QC_V3_RETRIES"] = str(retries)
+    env["ARK_QC_V3_RETRY_WAIT"] = str(retry_wait)
+    if max_tokens > 0:
+        env["ARK_QC_V3_MAX_TOKENS"] = str(max_tokens)
+    else:
+        env.pop("ARK_QC_V3_MAX_TOKENS", None)
+    env["ARK_QC_V3_REPORT_CHARS"] = str(include_report_chars)
+
+    cmd = [
+        sys.executable,
+        str(script),
+        "--model",
+        model,
+        "--timeout",
+        str(timeout),
+        "--include-report-chars",
+        str(include_report_chars),
+        "--retries",
+        str(retries),
+        "--retry-wait",
+        str(retry_wait),
+        "--non-blocking",
+    ]
+    if max_tokens > 0:
+        cmd.extend(["--max-tokens", str(max_tokens)])
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=str(WORKSPACE_ROOT),
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=runner_timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        completed_at = now_local()
+        return {
+            "enabled": True,
+            "attempted": True,
+            "provider": "ark",
+            "mode": "large_context",
+            "model": model,
+            "model_started_at": started_at.isoformat(timespec="seconds"),
+            "model_completed_at": completed_at.isoformat(timespec="seconds"),
+            "model_duration_ms": int((completed_at - started_at).total_seconds() * 1000),
+            "error": f"large-context QC runner timed out after {runner_timeout}s: {str(exc)[:800]}",
+            "checkpoint_file": str(checkpoint_file),
+        }
+
+    completed_at = now_local()
+    checkpoint: dict[str, Any] = {}
+    if checkpoint_file.exists():
+        try:
+            checkpoint = load_json(checkpoint_file)
+        except Exception as exc:  # noqa: BLE001
+            checkpoint = {"checkpoint_read_error": str(exc)}
+    advisory: dict[str, Any] = {}
+    if advisory_file.exists():
+        try:
+            advisory = load_json(advisory_file)
+        except Exception as exc:  # noqa: BLE001
+            advisory = {"advisory_read_error": str(exc)}
+
+    result: dict[str, Any] = {
+        "enabled": True,
+        "attempted": True,
+        "provider": "ark",
+        "mode": "large_context",
+        "model": model,
+        "model_started_at": started_at.isoformat(timespec="seconds"),
+        "model_completed_at": completed_at.isoformat(timespec="seconds"),
+        "model_duration_ms": int((completed_at - started_at).total_seconds() * 1000),
+        "runner_returncode": completed.returncode,
+        "checkpoint_file": str(checkpoint_file),
+        "advisory_file": str(advisory_file) if advisory_file.exists() else None,
+        "prompt_artifact_file": checkpoint.get("prompt_file"),
+        "prompt_sha256": checkpoint.get("prompt_sha256"),
+        "prompt_chars": checkpoint.get("prompt_chars"),
+        "qc_validated": checkpoint.get("qc_validated"),
+        "validation_errors": checkpoint.get("validation_errors") or advisory.get("_validation_errors") or [],
+        "validation_notes": advisory.get("validation_notes") or [],
+        "gpt_review_required": checkpoint.get("gpt_review_required") if "gpt_review_required" in checkpoint else advisory.get("gpt_review_required"),
+        "audit_pack_strategy": checkpoint.get("audit_pack_strategy") or advisory.get("audit_pack_strategy"),
+        "possible_overlooked_signals": advisory.get("possible_overlooked_signals") or [],
+        "fact_or_scope_warnings": advisory.get("fact_or_scope_warnings") or [],
+        "weighting_or_priority_warnings": advisory.get("weighting_or_priority_warnings") or [],
+        "style_warnings": advisory.get("style_warnings") or [],
+        "usage": checkpoint.get("usage"),
+    }
+    status = str(checkpoint.get("status") or "").strip()
+    if completed.returncode != 0 or status == "failed":
+        failure = checkpoint.get("failure_class") or checkpoint.get("failure_type") or "large_context_qc_failed"
+        validation_errors = checkpoint.get("validation_errors") or []
+        result["error"] = json.dumps(
+            {
+                "failure_class": failure,
+                "validation_errors": validation_errors[:3] if isinstance(validation_errors, list) else validation_errors,
+                "stdout_tail": (completed.stdout or "")[-1200:],
+                "stderr_tail": (completed.stderr or "")[-1200:],
+            },
+            ensure_ascii=False,
+        )
+    return result
+
+
 def review_has_findings(review: dict[str, Any]) -> bool:
+    style_warnings = review.get("style_warnings")
+    weighting_warnings = review.get("weighting_or_priority_warnings")
+    # A non-blocking Ark/QC invocation failure is an execution warning, not a
+    # substantive review finding.  It must not trigger a second GPT pass that
+    # rereads the full source file and risks another timeout.
+    if (
+        not review.get("possible_overlooked_signals")
+        and not review.get("fact_or_scope_warnings")
+        and not weighting_warnings
+        and isinstance(style_warnings, list)
+        and style_warnings
+        and all("后置质检调用失败" in str(item) for item in style_warnings)
+    ):
+        return False
     return bool(
         review.get("possible_overlooked_signals")
         or review.get("fact_or_scope_warnings")
-        or review.get("style_warnings")
+        or weighting_warnings
+        or style_warnings
     )
 
 
@@ -2409,21 +2634,45 @@ def gpt_decide_ark_review_and_finalize(
     agent = str(check_config.get("gpt_review_agent") or (config.get("openclaw_summary") or {}).get("agent") or "daily-writer")
     model = str(check_config.get("gpt_review_model") or (config.get("openclaw_summary") or {}).get("model") or "openai-codex/gpt-5.5")
     timeout = int((config.get("openclaw_summary") or {}).get("timeout") or 300)
+    ark_review_status = {
+        "qc_validated": ark_review.get("qc_validated"),
+        "validation_errors": ark_review.get("validation_errors") or [],
+        "validation_notes": ark_review.get("validation_notes") or [],
+        "gpt_review_required": ark_review.get("gpt_review_required"),
+        "audit_pack_strategy": ark_review.get("audit_pack_strategy"),
+        "input_transport": ark_review.get("input_transport"),
+        "prompt_artifact_file": ark_review.get("prompt_artifact_file"),
+        "audit_pack_file": ark_review.get("audit_pack_file"),
+        "source_input_file": ark_review.get("source_input_file"),
+        "coverage": ark_review.get("coverage") or {},
+    }
+    ark_review_findings = {
+        key: ark_review.get(key)
+        for key in [
+            "possible_overlooked_signals",
+            "fact_or_scope_warnings",
+            "weighting_or_priority_warnings",
+            "style_warnings",
+        ]
+    }
     prompt = (
         "你是日报正式写作 worker。Ark 已给出后置质检意见，但 Ark 只提供建议，不能直接改稿；最终是否采纳由 GPT 基于完整原文独立决定。\n"
         f"请先完整读取原始消息文件：{input_file}\n"
-        "必须基于文件中的全部原文复核 Ark 意见，不得只根据 Ark 意见或当前稿件判断。\n"
+        "必须基于文件中的全部原文复核 Ark 意见，不得只根据 Ark 意见或当前稿件判断；也不得因为 Ark 声称已读完整信息流就省略自己的复核。\n"
+        "如果 Ark 质检状态显示 qc_validated=false、full_raw_flow_not_read、audit_pack_not_sufficient_for_global_review 或其他 validation_errors，你仍可把 Ark 意见当作审稿线索，但不能当成已经验证的结论；每一条采纳都必须由你重新在原始消息文件中找到证据。\n"
         "不要因为 Ark 提出保守化、表层化或官方话术化建议，就削弱原稿中有证据的清晰判断、市场洞察、政策意图拆解、责任/成本分配分析和风险提示。\n"
-        "采纳 Ark 意见的前提是它指出了明确事实错误、范围错误、遗漏的高价值原文证据或无证据过度推断；若 Ark 只是偏好更圆滑、更概括或更像官方表述，应明确 rejected。\n"
+        "采纳 Ark 意见的前提是它指出了明确事实错误、范围错误、遗漏的高价值原文证据、权重明显失衡或无证据过度推断；若 Ark 只是偏好更圆滑、更概括或更像官方表述，应明确 rejected。\n"
+        "最终 summary_paragraphs 是给用户直接阅读的正式终稿，不是版本对比稿；禁止出现内部修订/评价框架，例如“原稿如何”“上一版遗漏”“本次修订”“质检认为”“Ark/Kimi/GPT review 建议”“应补入正文”。注意限制的是内部改稿视角，不是具体词语本身；“市场低估风险”这类自然市场判断可以使用。所有采纳项都要自然融入市场叙事。\n"
         f"阶段：{phase_label}\n窗口：{window.get('start') or '无'} 至 {window.get('end') or '无'}\n"
         f"当前 GPT 正式稿：{json.dumps(openclaw_digest.get('summary_paragraphs') or [], ensure_ascii=False)}\n"
-        f"Ark 质检意见：{json.dumps({k: ark_review.get(k) for k in ['possible_overlooked_signals','fact_or_scope_warnings','style_warnings']}, ensure_ascii=False)}\n"
+        f"Ark 质检状态：{json.dumps(ark_review_status, ensure_ascii=False)}\n"
+        f"Ark 质检意见：{json.dumps(ark_review_findings, ensure_ascii=False)}\n"
         "请输出最终 JSON：如果 Ark 意见正确，可以修改 summary_paragraphs；如果 Ark 误判或教条化，可以保持原稿。\n"
         "必须返回严格 JSON，不要 Markdown："
-        "{\"summary_paragraphs\":[\"...\"],\"observation\":{\"repeated_words\":[\"...\"],\"multi_day_themes\":[\"...\"],\"watch_next\":[\"...\"]},\"ark_review_decisions\":[{\"suggestion\":\"...\",\"decision\":\"accepted|rejected\",\"reason\":\"...\"}]}"
+        "{\"summary_paragraphs\":[\"...\"],\"observation\":{\"repeated_words\":[\"...\"],\"multi_day_themes\":[\"...\"],\"watch_next\":[\"...\"]},\"ark_review_decisions\":[{\"suggestion\":\"...\",\"source_refs\":[\"...\"],\"decision\":\"accepted|rejected\",\"reason\":\"...\",\"evidence_basis\":\"full_raw_flow|not_supported|already_covered|style_preference\"}]}"
     )
     started_at = now_local()
-    completed = run_process_group(
+    completed = run_openclaw_model_call(
         [
             str(openclaw_bin),
             "agent",
@@ -2434,7 +2683,7 @@ def gpt_decide_ark_review_and_finalize(
             f"market-digest-gpt-ark-decision-{run_slug}",
             "--json",
             "--thinking",
-            str(check_config.get("gpt_review_thinking") or "low"),
+            str(check_config.get("gpt_review_thinking") or "high"),
             "--timeout",
             str(timeout),
             "--model",
@@ -2613,6 +2862,552 @@ def write_market_model_input_file(
     return path
 
 
+def write_market_model_prompt_artifact(*, config: dict[str, Any], run_slug: str, attempt: int, prompt: str) -> tuple[Path, str]:
+    """Persist exact formal prompt bytes for non-argv native OpenClaw transport."""
+    output_dir = Path(config.get("output_dir") or "~/.openclaw/workspace/market-immersion").expanduser()
+    target_dir = output_dir / "model-inputs" / safe_name(run_slug) / "prompt-artifacts"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / f"formal_digest_prompt_attempt{attempt}.txt"
+    path.write_text(prompt, encoding="utf-8")
+    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    return path, digest
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_market_qc_input_file(
+    *,
+    config: dict[str, Any],
+    run_slug: str,
+    phase_label: str,
+    window: dict[str, Any],
+    items: list[dict[str, Any]],
+    openclaw_digest: dict[str, Any],
+) -> Path:
+    """Persist full, untruncated source material for advisory QC."""
+    output_dir = Path(config.get("output_dir") or "~/.openclaw/workspace/market-immersion").expanduser()
+    target_dir = output_dir / "model-inputs" / safe_name(run_slug)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / "full_raw_flow_for_ark_qc.json"
+    payload = {
+        "schema": "market_immersion_ark_qc_input.v1",
+        "phase_label": phase_label,
+        "window": window,
+        "item_count": len(items),
+        "items": build_openclaw_payload_items(all_items=items, max_item_chars=0),
+        "gpt_digest": {
+            "summary_paragraphs": openclaw_digest.get("summary_paragraphs") or [],
+            "observation": openclaw_digest.get("observation") or {},
+            "source_input_file": openclaw_digest.get("source_input_file"),
+        },
+        "contract": {
+            "qc_role": "advisory_only",
+            "formal_writer": "gpt",
+            "gpt_decides_adoption": True,
+            "no_input_truncation": True,
+            "do_not_rewrite_formal_report": True,
+        },
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def write_market_qc_prompt_artifact(*, config: dict[str, Any], run_slug: str, prompt: str) -> tuple[Path, str]:
+    output_dir = Path(config.get("output_dir") or "~/.openclaw/workspace/market-immersion").expanduser()
+    target_dir = output_dir / "model-inputs" / safe_name(run_slug) / "prompt-artifacts"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / "ark_qc_prompt.txt"
+    path.write_text(prompt, encoding="utf-8")
+    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    return path, digest
+
+
+MARKET_QC_HIGH_SIGNAL_KEYWORDS = [
+    "CPI",
+    "通胀",
+    "降息",
+    "加息",
+    "美联储",
+    "央行",
+    "国债",
+    "收益率",
+    "汇率",
+    "日元",
+    "美元",
+    "黄金",
+    "白银",
+    "原油",
+    "铜",
+    "铝",
+    "财报",
+    "业绩",
+    "回购",
+    "并购",
+    "监管",
+    "政策",
+    "AI",
+    "算力",
+    "芯片",
+    "英伟达",
+    "台积电",
+    "汽车",
+    "新能源",
+    "储能",
+    "医药",
+    "地产",
+    "债务",
+    "中东",
+    "俄乌",
+]
+
+
+def market_qc_clip(value: Any, limit: int) -> str:
+    text = "" if value is None else str(value).replace("\n", " ").strip()
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)] + "…"
+
+
+def market_qc_item_ref(item: dict[str, Any]) -> str:
+    return str(item.get("serial") or item.get("entry_id") or "")
+
+
+def compact_digest_for_qc(openclaw_digest: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "summary_paragraphs": openclaw_digest.get("summary_paragraphs") or [],
+        "observation": openclaw_digest.get("observation") or {},
+        "coverage_check": openclaw_digest.get("coverage_check") or {},
+        "model": openclaw_digest.get("model"),
+        "agent": openclaw_digest.get("agent"),
+        "input_transport": openclaw_digest.get("input_transport"),
+    }
+
+
+def build_market_qc_audit_pack(
+    *,
+    items: list[dict[str, Any]],
+    openclaw_digest: dict[str, Any],
+    run_slug: str,
+    source_input_file: Path,
+    source_input_sha256: str,
+    summary_file: Path | None,
+    summary_file_sha256: str | None,
+    evidence_limit: int,
+    evidence_excerpt_chars: int,
+) -> dict[str, Any]:
+    coverage: list[list[str]] = []
+    evidence_map: dict[str, dict[str, Any]] = {}
+    for item in items:
+        ref = market_qc_item_ref(item)
+        title = str(item.get("title") or "")
+        content = str(item.get("content") or "")
+        source = str(item.get("source") or "")
+        coverage.append(
+            [
+                ref,
+                market_qc_clip(item.get("bucket"), 8),
+                market_qc_clip(source, 12),
+                market_qc_clip(title, 24),
+            ]
+        )
+        haystack = title + " " + content
+        score = sum(8 for word in MARKET_QC_HIGH_SIGNAL_KEYWORDS if word and word in haystack)
+        if item.get("bucket") == "in_window":
+            score += 2
+        if score <= 0:
+            continue
+        evidence_map[ref] = {
+            "ref": ref,
+            "title": market_qc_clip(title, 90),
+            "date": item.get("date"),
+            "source": source,
+            "type": item.get("type"),
+            "bucket": item.get("bucket"),
+            "reason": "keyword_high_signal",
+            "excerpt": market_qc_clip(content, evidence_excerpt_chars),
+            "_score": score,
+        }
+    evidence = sorted(
+        evidence_map.values(),
+        key=lambda row: (-int(row.get("_score") or 0), str(row.get("ref") or "")),
+    )[: max(0, evidence_limit)]
+    for row in evidence:
+        row.pop("_score", None)
+    return {
+        "schema_version": "raw_flow_audit_pack_v1",
+        "run_slug": run_slug,
+        "strategy": "coverage_index_plus_focused_evidence_v1",
+        "source_input_file": str(source_input_file),
+        "source_input_sha256": source_input_sha256,
+        "summary_file": str(summary_file) if summary_file is not None else None,
+        "summary_file_sha256": summary_file_sha256,
+        "raw_source_item_count": len(items),
+        "coverage_index_item_count": len(coverage),
+        "coverage_index_columns": ["ref", "bucket", "source", "title24"],
+        "coverage_index": coverage,
+        "evidence_item_count": len(evidence),
+        "evidence_pack_scope": f"keyword_high_signal_top{max(0, evidence_limit)}",
+        "focused_evidence_pack": evidence,
+        "gpt_formal_output_under_review": compact_digest_for_qc(openclaw_digest),
+        "gpt_digest": compact_digest_for_qc(openclaw_digest),
+    }
+
+
+def write_market_qc_audit_pack_artifact(
+    *,
+    config: dict[str, Any],
+    run_slug: str,
+    pack: dict[str, Any],
+) -> tuple[Path, str]:
+    output_dir = Path(config.get("output_dir") or "~/.openclaw/workspace/market-immersion").expanduser()
+    target_dir = output_dir / "model-inputs" / safe_name(run_slug) / "qc-artifacts"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / "raw_flow_audit_pack.json"
+    text = json.dumps(pack, ensure_ascii=False, indent=2)
+    path.write_text(text, encoding="utf-8")
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return path, digest
+
+
+def build_ark_qc_artifact_prompt(*, phase_label: str, window: dict[str, Any], pack: dict[str, Any]) -> str:
+    coverage_text = "\n".join("|".join(map(str, row)) for row in pack.get("coverage_index") or [])
+    evidence_text = json.dumps(pack.get("focused_evidence_pack") or [], ensure_ascii=False, separators=(",", ":"))
+    formal_output_text = json.dumps(
+        pack.get("gpt_formal_output_under_review") or pack.get("gpt_digest") or {},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return f"""你是市场日报后置质检员，不是主笔，也不是改写模型。
+
+你的任务：
+同时对照【GPT 已生成、准备给用户看的正式稿】和【GPT 写作时使用的同一份完整原始/去重信息流】，判断正式稿是否存在重大遗漏、事实/范围错误、权重失衡或表达风险。
+
+你的输出只是给 GPT daily-writer 的结构化审稿意见。最终是否采纳、如何修订、是否发布，都由 GPT 和主流程决定。
+
+关键边界：
+- Ark/Kimi/GLM 只做 advisory QC。
+- GPT 是正式主笔和最终 accept/reject reviewer。
+- 不要写新正文，不要给可直接发布的改写稿。
+- 不要输出“原稿如何、修订后如何、质检认为”等用户可见的内部批改口吻；这些只能作为给 GPT 的审稿意见。
+- 只基于本 prompt 和明确给出的本地文件材料判断。
+- 如果你没有实际读取完整信息流，只读到了覆盖索引或聚焦证据包，必须明确标记 full_raw_flow_read=false，并把 audit_pack_sufficient_for_global_review 设为 false 或在 validation_notes 里说明限制。
+- source_refs 必须来自 Layer A 覆盖索引。
+- 只返回严格 JSON，不要 Markdown，不要代码块。
+
+输入关系：
+- 被审对象是 GPT 正式稿；本轮如果只有 digest paragraphs，它们就是本轮准备发布给用户的正式内容。
+- 信息源是 GPT 写作时使用的完整原始/去重信息流文件；它是判断“漏、错、权重不对”的主要依据。
+- Layer A / Layer B 只是审计导航：
+  - Layer A 是全部 raw-flow items 的完整覆盖索引，用来保证全局 refs 可追踪。
+  - Layer B 是聚焦证据包，含 excerpt，用来帮助快速审查事实、范围和权重。
+  - Layer A / Layer B 不能替代完整原始信息流；如果无法读取完整信息流，不得声称完成了无保留的全局质检。
+
+输入元数据：
+- run_slug: {pack.get("run_slug")}
+- phase: {phase_label}
+- window: {window.get("start") or "无"} 至 {window.get("end") or "无"}
+- full_raw_flow_file: {pack.get("source_input_file")}
+- raw_flow_sha256: {pack.get("source_input_sha256")}
+- gpt_formal_output_file: {pack.get("summary_file")}
+- digest_sha256: {pack.get("summary_file_sha256")}
+- raw_source_item_count: {pack.get("raw_source_item_count")}
+- coverage_index_item_count: {pack.get("coverage_index_item_count")}
+- evidence_item_count: {pack.get("evidence_item_count")}
+- audit_pack_strategy: coverage_index_plus_focused_evidence_v1
+- evidence_pack_scope: {pack.get("evidence_pack_scope")}
+
+【被审对象：GPT 正式稿 / digest paragraphs】
+{formal_output_text}
+
+【主信息源：GPT 写作时使用的完整原始/去重信息流文件】
+请尽可能完整读取这个 UTF-8 JSON 文件后再判断：
+{pack.get("source_input_file")}
+
+【Layer A: 完整覆盖索引 TSV，列为 ref|bucket|source|title24】
+{coverage_text}
+
+【Layer B: 聚焦证据包 JSON】
+{evidence_text}
+
+请输出严格 JSON，字段如下：
+{{
+  "schema_version": "ark_qc_v3_global_v1",
+  "run_slug": "{pack.get("run_slug")}",
+  "input_status": "ok | missing_or_invalid",
+  "formal_output_reviewed": true,
+  "full_raw_flow_read": true,
+  "audit_pack_strategy": "coverage_index_plus_focused_evidence_v1",
+  "raw_source_item_count": {pack.get("raw_source_item_count")},
+  "coverage_index_item_count": {pack.get("coverage_index_item_count")},
+  "coverage_index_complete": true,
+  "evidence_item_count": {pack.get("evidence_item_count")},
+  "evidence_pack_scope": "{pack.get("evidence_pack_scope")}",
+  "audit_pack_sufficient_for_global_review": true,
+  "possible_overlooked_signals": [
+    {{
+      "severity": "high | medium | low",
+      "source_refs": [],
+      "evidence_basis": "full_raw_flow | evidence_excerpt | coverage_index | v2_candidate",
+      "signal": "",
+      "why_it_matters": "",
+      "gpt_report_coverage": "absent | underweighted | covered",
+      "suggested_review_question_for_gpt": ""
+    }}
+  ],
+  "fact_or_scope_warnings": [
+    {{
+      "severity": "high | medium | low",
+      "source_refs": [],
+      "evidence_basis": "full_raw_flow | evidence_excerpt | v2_candidate",
+      "report_location_or_quote": "",
+      "issue": "",
+      "suggested_check": ""
+    }}
+  ],
+  "weighting_or_priority_warnings": [
+    {{
+      "severity": "high | medium | low",
+      "source_refs": [],
+      "evidence_basis": "full_raw_flow | evidence_excerpt | coverage_index | v2_candidate",
+      "issue": "",
+      "why_priority_should_change": "",
+      "suggested_review_question_for_gpt": ""
+    }}
+  ],
+  "style_warnings": [
+    {{
+      "severity": "medium | low",
+      "report_location_or_quote": "",
+      "issue": "",
+      "why_it_matters": "",
+      "suggested_check": ""
+    }}
+  ],
+  "validation_notes": [],
+  "gpt_review_required": true
+}}
+
+规则：
+- formal_output_reviewed、full_raw_flow_read、audit_pack_sufficient_for_global_review 和 gpt_review_required 必须按实际判断输出 true/false，不要机械照抄。
+- 只有当你确实读取了 GPT 正式稿和完整原始/去重信息流，且材料足够支撑全局审稿时，audit_pack_sufficient_for_global_review 才能为 true。
+- gpt_review_required=true 当任一 warning/finding 非空，或 audit_pack_sufficient_for_global_review=false。
+- fact_or_scope_warnings 的 evidence_basis 不能只用 coverage_index，必须是 full_raw_flow、evidence_excerpt 或 v2_candidate。
+- 所有 source_refs 必须存在于 Layer A。
+- 不要把“GPT 已覆盖但你表达偏好不同”的内容列为问题；只有漏掉、事实/范围错误、权重明显失衡或表达会误导用户时才列。
+- 不要输出 schema 外字段。
+"""
+
+
+def validate_market_qc_advisory(result: dict[str, Any], pack: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    refs = {str(row[0]) for row in pack.get("coverage_index") or []}
+    if result.get("schema_version") != "ark_qc_v3_global_v1":
+        errors.append("bad_schema_version")
+    if result.get("input_status") != "ok":
+        errors.append("input_status_not_ok")
+    if result.get("formal_output_reviewed") is not True:
+        errors.append("formal_output_not_reviewed")
+    if result.get("full_raw_flow_read") is not True:
+        errors.append("full_raw_flow_not_read")
+    if result.get("audit_pack_strategy") != "coverage_index_plus_focused_evidence_v1":
+        errors.append("bad_audit_pack_strategy")
+    if result.get("audit_pack_sufficient_for_global_review") is not True:
+        errors.append("audit_pack_not_sufficient_for_global_review")
+    if int(result.get("raw_source_item_count") or 0) != int(pack.get("raw_source_item_count") or 0):
+        errors.append("raw_source_item_count_mismatch")
+    if int(result.get("coverage_index_item_count") or 0) != int(pack.get("coverage_index_item_count") or 0):
+        errors.append("coverage_index_item_count_mismatch")
+    if result.get("coverage_index_complete") is not True:
+        errors.append("coverage_index_not_complete")
+    for key in ("possible_overlooked_signals", "fact_or_scope_warnings", "weighting_or_priority_warnings", "style_warnings"):
+        for finding in result.get(key) or []:
+            if not isinstance(finding, dict):
+                continue
+            for ref in finding.get("source_refs") or []:
+                if str(ref) not in refs:
+                    errors.append(f"unknown_source_ref:{ref}")
+            if key == "fact_or_scope_warnings" and finding.get("evidence_basis") == "coverage_index":
+                errors.append("fact_scope_uses_coverage_index_only")
+    return errors
+
+
+def generate_raw_flow_quality_check_artifact(
+    *,
+    config: dict[str, Any],
+    items: list[dict[str, Any]],
+    openclaw_digest: dict[str, Any],
+    run_slug: str,
+    check_config: dict[str, Any],
+) -> dict[str, Any]:
+    started_at = now_local()
+    openclaw_bin = Path(config.get("openclaw_bin") or "openclaw").expanduser()
+    model = str(check_config.get("model") or "volcengine-plan/glm-5.1")
+    timeout = int(check_config.get("timeout") or 180)
+    phase_label = str(openclaw_digest.get("phase_label") or run_slug)
+    window = openclaw_digest.get("window") if isinstance(openclaw_digest.get("window"), dict) else {}
+
+    source_input_file: Path | None = None
+    raw_source_input_file = str(openclaw_digest.get("source_input_file") or "").strip()
+    if raw_source_input_file:
+        candidate = Path(raw_source_input_file).expanduser()
+        if candidate.exists():
+            source_input_file = candidate
+    if source_input_file is None:
+        source_input_file = write_market_qc_input_file(
+            config=config,
+            run_slug=run_slug,
+            phase_label=phase_label,
+            window=window,
+            items=items,
+            openclaw_digest=openclaw_digest,
+        )
+    source_input_sha256 = sha256_file(source_input_file)
+
+    summary_file: Path | None = None
+    raw_summary_file = str(openclaw_digest.get("openclaw_summary_file") or "").strip()
+    if raw_summary_file:
+        candidate = Path(raw_summary_file).expanduser()
+        if candidate.exists():
+            summary_file = candidate
+    summary_file_sha256 = sha256_file(summary_file) if summary_file is not None else None
+
+    evidence_limit = int(check_config.get("evidence_item_limit") or 65)
+    evidence_excerpt_chars = int(check_config.get("evidence_excerpt_chars") or 260)
+    audit_pack = build_market_qc_audit_pack(
+        items=items,
+        openclaw_digest=openclaw_digest,
+        run_slug=run_slug,
+        source_input_file=source_input_file,
+        source_input_sha256=source_input_sha256,
+        summary_file=summary_file,
+        summary_file_sha256=summary_file_sha256,
+        evidence_limit=evidence_limit,
+        evidence_excerpt_chars=evidence_excerpt_chars,
+    )
+    audit_pack_file, audit_pack_sha256 = write_market_qc_audit_pack_artifact(
+        config=config,
+        run_slug=run_slug,
+        pack=audit_pack,
+    )
+
+    prompt = build_ark_qc_artifact_prompt(
+        phase_label=phase_label,
+        window=window,
+        pack=audit_pack,
+    )
+    prompt_file, prompt_sha256 = write_market_qc_prompt_artifact(config=config, run_slug=run_slug, prompt=prompt)
+    native_message = (
+        "Read the UTF-8 prompt file completely and execute it.\n"
+        f"Prompt file: {prompt_file}\n"
+        f"Prompt sha256: {prompt_sha256}\n"
+        "Return only the strict JSON requested by that prompt. Do not summarize the file path."
+    )
+    cmd = [
+        str(openclaw_bin),
+        "agent",
+        "--local",
+        "--agent",
+        str(check_config.get("agent") or "ark-review"),
+        "--session-id",
+        f"market-raw-flow-qc-{run_slug}",
+        "--json",
+        "--thinking",
+        str(check_config.get("thinking") or "low"),
+        "--timeout",
+        str(timeout),
+        "--model",
+        model,
+        "--message",
+        native_message,
+    ]
+    try:
+        completed = run_process_group(
+            cmd,
+            text=True,
+            capture_output=True,
+            timeout=timeout + 30,
+            check=False,
+        )
+        completed_at = now_local()
+        base = {
+            "enabled": True,
+            "attempted": True,
+            "provider": "ark",
+            "model": model,
+            "model_started_at": started_at.isoformat(timespec="seconds"),
+            "model_completed_at": completed_at.isoformat(timespec="seconds"),
+            "model_duration_ms": int((completed_at - started_at).total_seconds() * 1000),
+            "role": "post_generation_quality_check_only",
+            "input_transport": "artifact_file_reference",
+            "prompt_artifact_file": str(prompt_file),
+            "prompt_artifact_sha256": prompt_sha256,
+            "audit_pack_strategy": "coverage_index_plus_focused_evidence_v1",
+            "audit_pack_file": str(audit_pack_file),
+            "audit_pack_sha256": audit_pack_sha256,
+            "source_input_file": str(source_input_file),
+            "source_input_sha256": source_input_sha256,
+            "summary_file": str(summary_file) if summary_file is not None else None,
+            "summary_file_sha256": summary_file_sha256,
+            "coverage": {
+                "items": len(items),
+                "chunks": 0,
+                "max_item_chars": 0,
+                "input_transport": "artifact_file_reference",
+                "audit_pack_strategy": "coverage_index_plus_focused_evidence_v1",
+                "coverage_index_item_count": audit_pack.get("coverage_index_item_count"),
+                "evidence_item_count": audit_pack.get("evidence_item_count"),
+                "evidence_pack_scope": audit_pack.get("evidence_pack_scope"),
+                "audit_pack_file": str(audit_pack_file),
+                "prompt_artifact_file": str(prompt_file),
+                "source_input_file": str(source_input_file),
+            },
+        }
+        if completed.returncode != 0:
+            return {**base, "error": completed.stderr[-1200:] or completed.stdout[-1200:]}
+        data = extract_json_object(completed.stdout)
+        text = "\n".join(
+            payload.get("text", "")
+            for payload in data.get("payloads", [])
+            if isinstance(payload, dict)
+        )
+        result = extract_json_object(text)
+        validation_errors = validate_market_qc_advisory(result, audit_pack)
+        style_warnings = result.get("style_warnings") or []
+        if validation_errors and not style_warnings:
+            style_warnings = ["后置质检未完成可验证的全量审计，已要求 GPT 复核。"]
+        return {
+            **base,
+            "qc_validated": not validation_errors,
+            "validation_errors": validation_errors,
+            "possible_overlooked_signals": result.get("possible_overlooked_signals") or [],
+            "fact_or_scope_warnings": result.get("fact_or_scope_warnings") or [],
+            "weighting_or_priority_warnings": result.get("weighting_or_priority_warnings") or [],
+            "style_warnings": style_warnings,
+            "validation_notes": result.get("validation_notes") or [],
+            "gpt_review_required": bool(result.get("gpt_review_required") or validation_errors),
+            "usage": (data.get("meta") or {}).get("agentMeta", {}).get("usage"),
+        }
+    except Exception as exc:  # noqa: BLE001 - QC must not block publication
+        completed_at = now_local()
+        return {
+            "enabled": True,
+            "attempted": True,
+            "provider": "ark",
+            "model": model,
+            "model_started_at": started_at.isoformat(timespec="seconds"),
+            "model_completed_at": completed_at.isoformat(timespec="seconds"),
+            "model_duration_ms": int((completed_at - started_at).total_seconds() * 1000),
+            "input_transport": "artifact_file_reference",
+            "prompt_artifact_file": str(prompt_file) if "prompt_file" in locals() else None,
+            "audit_pack_strategy": "coverage_index_plus_focused_evidence_v1",
+            "audit_pack_file": str(audit_pack_file) if "audit_pack_file" in locals() else None,
+            "source_input_file": str(source_input_file) if "source_input_file" in locals() and source_input_file is not None else None,
+            "error": str(exc),
+        }
+
+
 def build_openclaw_summary_file_prompt(
     *,
     phase_label: str,
@@ -2624,8 +3419,8 @@ def build_openclaw_summary_file_prompt(
     return (
         "你是日报正式写作 worker，使用 GPT 负责正式市场信息浸泡日报，不是质检模型，也不是财经媒体摘要器。\n"
         "正式写作必须基于完整原文，不得只看候选包、中间笔记、文件开头或抽样内容。\n"
-        f"请先用文件读取工具完整读取这个 JSON 文件：{input_file}\n"
-        f"文件中 items 数组共有 {item_count} 条原始消息。你必须基于全部 {item_count} 条原文生成正式信息汇总；不要裁剪、不要跳过长正文、不要用摘要替代原文。\n"
+        f"完整原始输入文件已由外层流水线生成并记录：{input_file}\n"
+        f"文件中 items 数组共有 {item_count} 条原始消息。若调用方直接提供分片内容，你必须基于全部分片生成正式信息汇总；不要裁剪、不要跳过长正文、不要用摘要替代原文，也不要自行用工具分页读取该文件。\n"
         "写作规则：\n"
         "1. 只整理事实和消息含义，不预测涨跌，不给买卖建议。\n"
         "2. 不要按栏目拆分，不要写编号列表，不要输出信源、原文编号、状态、时间归类、信息类型等工程字段。\n"
@@ -2669,10 +3464,11 @@ def build_openclaw_chunked_messages(
     payload_text = json.dumps(payload_items, ensure_ascii=False)
     chunks = chunk_text(payload_text, chunk_chars)
     phase_scope_rule = market_scope_rule_short_for_phase(phase_label)
+    serials = [str(item.get("serial") or "") for item in payload_items if item.get("serial") is not None]
     messages = [
         (
             "你是市场信息流研判助手。任务不是财经媒体摘要，也不是交易建议，而是全面吸收阶段性信息流，过滤噪音，提炼对市场理解有帮助的洞察。\n"
-            "接下来我会分片发送原始消息 JSON。请先只确认已接收，不要生成日报。\n"
+            "接下来我会分片发送原始消息 JSON。所有分片合起来就是本轮完整输入；这不是抽样、不是裁剪、不是候选包。请先只确认已接收，不要生成日报，也不要调用文件读取工具。\n"
             "最终要求：生成前后连贯、逻辑清晰、兼顾覆盖与降噪的阶段性市场洞察；不要按栏目拆分，不要写编号列表；"
             "输入里的content是正文材料，title只作归类辅助；content_quality为title_only/title_like的消息按短快讯处理，不要扩写；"
             "窗口时间只用于后台筛选，禁止在正文里说明本次窗口、补发/重跑、没有混入某时间之后的新闻等工程口径；"
@@ -2685,14 +3481,14 @@ def build_openclaw_chunked_messages(
             "优先使用“这一阶段的信息流显示”“截至本阶段”“同时出现”“相互印证”“仍需区分”“尚不能推出”等低强度表达；"
             "禁止空泛或过度分析句，例如“后续值得关注”“整体来看”“提供线索”“需要继续观察”“共同指向”“出现错位”“对冲不确定性”“结构活跃”；"
             "禁止后台写作/批改口吻，例如“不该写成”“不能简单归纳为”“后续简报应”“真正要保留的判断是”；"
-            "如果只能看到并列事实，就写成并列事实，不要强行提炼大主题；返回严格 JSON，不要 Markdown。\n"
+            "如果只能看到并列事实，就写成并列事实，不要强行提炼大主题；必须基于全部分片完成全覆盖吸收，不能只看开头、结尾或高频主题；返回严格 JSON，不要 Markdown。\n"
             'JSON格式：{"summary_paragraphs":["...","..."],"observation":'
-            '{"repeated_words":["..."],"multi_day_themes":["..."],"watch_next":["..."]}}\n'
+            '{"repeated_words":["..."],"multi_day_themes":["..."],"watch_next":["..."]},"coverage_check":{"input_item_count":数字,"used_all_chunks":true,"notes":"..."}}\n'
             f"阶段：{phase_label}\n"
             f"窗口：{window.get('start') or '无'} 至 {window.get('end') or '无'}\n"
             "中性分类结果只供材料定位，不代表价值判断；正式取舍由你基于原始信息决定：\n"
             f"{json.dumps(raw_flow_classification or {}, ensure_ascii=False)}\n"
-            f"原始消息总数：{len(payload_items)}，分片数：{len(chunks)}"
+            f"原始消息总数：{len(payload_items)}，分片数：{len(chunks)}，serial范围/集合：{','.join(serials[:80])}{'...' if len(serials) > 80 else ''}"
         )
     ]
     for index, chunk in enumerate(chunks, 1):
@@ -2700,9 +3496,45 @@ def build_openclaw_chunked_messages(
     messages.append(
         "以上原始消息已经发送完毕。现在请根据全部分片生成最终 JSON。"
         "只返回 JSON 对象，不要 Markdown，不要代码块。"
+        f"完整性要求：本轮共有 {len(payload_items)} 条原始消息、{len(chunks)} 个分片；你必须基于全部分片生成，不得抽样、不得裁剪、不得用局部信息代替完整信息。"
         "质量要求：默认 4-6 个自然段，每段 180-360 个中文字符；段落数是弹性建议，不是硬性上限，信息密度确实需要时可以超过 6 段；每段至少包含两个具体事实颗粒，不能写空泛综述，也不能把阶段信息流拔高为全天判断。"
     )
     return messages
+
+
+def write_summary_input_coverage_manifest(
+    *,
+    config: dict[str, Any],
+    run_slug: str,
+    all_items: list[dict[str, Any]],
+    messages: list[str],
+    source_input_file: Path | None,
+) -> Path:
+    """Write a local audit artifact proving the model transport covered every input item.
+
+    This is not a quality downgrade.  It records that the outer pipeline, rather
+    than the agent, split the complete input into deterministic chunks so the
+    writer does not waste the run budget paging through a file with tools.
+    """
+    output_dir = Path(config.get("output_dir") or "~/.openclaw/workspace/market-immersion").expanduser()
+    target_dir = output_dir / "model-inputs" / safe_name(run_slug)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / "summary_input_coverage_manifest.json"
+    serials = [item.get("serial") for item in all_items]
+    payload = {
+        "schema": "openclaw.market_immersion.summary_input_coverage.v1",
+        "run_slug": run_slug,
+        "source_input_file": str(source_input_file) if source_input_file else None,
+        "input_item_count": len(all_items),
+        "input_serials": serials,
+        "transport": "full_coverage_chunked_messages",
+        "message_count": len(messages),
+        "message_chars": [len(message) for message in messages],
+        "no_input_truncation": True,
+        "no_degraded_output": True,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
 
 
 def generate_openclaw_digest(
@@ -2734,7 +3566,10 @@ def generate_openclaw_digest(
 
 
     openclaw_bin = Path(config.get("openclaw_bin") or "openclaw").expanduser()
+    max_message_chars = int(summary_config.get("max_message_chars") or 60000)
     source_input_file: Path | None = None
+    coverage_manifest_file: Path | None = None
+    messages: list[str] | None = None
     if str(summary_config.get("input_mode") or "full_file") == "full_file":
         source_input_file = write_market_model_input_file(
             config=config,
@@ -2744,11 +3579,26 @@ def generate_openclaw_digest(
             all_items=all_items,
             raw_flow_classification=raw_flow_classification,
         )
-        prompt = build_openclaw_summary_file_prompt(
+        # Do not ask the writer agent to page through the large JSON via read()
+        # tools.  The outer pipeline already has the full input in memory, so it
+        # sends deterministic full-coverage chunks and records a local coverage
+        # manifest.  This preserves input completeness while avoiding the tool
+        # read loop that caused summary_timeout.
+        messages = build_openclaw_chunked_messages(
             phase_label=phase_label,
             window=window,
-            input_file=source_input_file,
-            item_count=len(all_items),
+            all_items=all_items,
+            max_item_chars=0,
+            max_model_items=0,
+            chunk_chars=max_message_chars,
+            raw_flow_classification=raw_flow_classification,
+        )
+        coverage_manifest_file = write_summary_input_coverage_manifest(
+            config=config,
+            run_slug=run_slug,
+            all_items=all_items,
+            messages=messages,
+            source_input_file=source_input_file,
         )
     else:
         prompt = build_openclaw_summary_prompt(
@@ -2765,10 +3615,13 @@ def generate_openclaw_digest(
     agent = str(summary_config.get("agent") or "daily-writer")
     retries = int(summary_config.get("retries") or 3)
     timeout = int(summary_config.get("timeout") or 300)
-    max_message_chars = int(summary_config.get("max_message_chars") or 60000)
     last_error = ""
+    invocation_slug = now_local().strftime("%Y%m%d%H%M%S")
     for attempt in range(1, retries + 1):
-        session_id = f"market-immersion-summary-{run_slug}-{attempt}"
+        # Use a fresh agent session for each digest invocation.  Reusing the
+        # old run_slug-only session can inherit a previous failed tool-reading
+        # trajectory and pollute a corrected resume run.
+        session_id = f"market-immersion-summary-{run_slug}-{invocation_slug}-{attempt}"
         base_cmd = [
             str(openclaw_bin),
             "agent",
@@ -2779,15 +3632,33 @@ def generate_openclaw_digest(
             session_id,
             "--json",
             "--thinking",
-            str(summary_config.get("thinking") or "low"),
+            str(summary_config.get("thinking") or "high"),
             "--timeout",
             str(timeout),
             "--model",
             model,
         ]
-        if source_input_file is not None or len(prompt) <= max_message_chars:
-            messages = [prompt]
-        else:
+        if messages is None:
+            if len(prompt) <= max_message_chars:
+                messages = [prompt]
+            else:
+                messages = build_openclaw_chunked_messages(
+                    phase_label=phase_label,
+                    window=window,
+                    all_items=all_items,
+                    max_item_chars=int(summary_config.get("max_item_chars") or 0),
+                    max_model_items=int(summary_config.get("max_model_items") or 0),
+                    chunk_chars=max_message_chars,
+                    raw_flow_classification=raw_flow_classification,
+                )
+                coverage_manifest_file = write_summary_input_coverage_manifest(
+                    config=config,
+                    run_slug=run_slug,
+                    all_items=all_items,
+                    messages=messages,
+                    source_input_file=source_input_file,
+                )
+        if messages is None:
             messages = build_openclaw_chunked_messages(
                 phase_label=phase_label,
                 window=window,
@@ -2798,38 +3669,66 @@ def generate_openclaw_digest(
                 raw_flow_classification=raw_flow_classification,
             )
         completed = None
-        for message in messages:
-            cmd = [*base_cmd, "--message", message]
-            try:
-                completed = run_process_group(
-                    cmd,
-                    text=True,
-                    capture_output=True,
-                    timeout=timeout + 30,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as exc:
-                completed_at = now_local()
-                return {
-                    "enabled": True,
-                    "attempted": True,
-                    "started_at": started,
-                    "model_started_at": model_started_at.isoformat(timespec="seconds"),
-                    "model_completed_at": completed_at.isoformat(timespec="seconds"),
-                    "model_duration_ms": int((completed_at - model_started_at).total_seconds() * 1000),
-                    "model": model,
-                    "agent": agent,
-                    "source_input_file": str(source_input_file) if source_input_file else None,
-                    "source_item_count": len(all_items),
-                    "attempts": attempt,
-                    "summary_status": "timeout",
-                    "failure_type": "summary_timeout",
-                    "error": f"summary generation timed out after {timeout + 30}s",
-                    "stderr": str(exc.stderr or "")[-4000:],
-                    "stdout": str(exc.output or "")[-4000:],
-                }
-            if completed.returncode != 0:
-                break
+        # Direct Provider V0 is stateless per call.  The legacy embedded-agent
+        # path accepted chunked messages as a session conversation, but sending
+        # those chunks as separate direct-provider calls means the final call
+        # only sees the short "generate now" instruction and returns an empty
+        # digest.  Preserve the complete input by combining the deterministic
+        # chunks into one provider prompt for the digest invocation.
+        combined_message = "\n\n---\n\n".join(messages)
+        prompt_artifact_file: Path | None = None
+        prompt_artifact_sha256: str | None = None
+        prompt_transport = "argv_message"
+        native_prompt_threshold = int(summary_config.get("native_prompt_artifact_threshold_chars") or 120000)
+        if len(combined_message) > native_prompt_threshold:
+            prompt_artifact_file, prompt_artifact_sha256 = write_market_model_prompt_artifact(
+                config=config,
+                run_slug=run_slug,
+                attempt=attempt,
+                prompt=combined_message,
+            )
+            prompt_transport = "artifact_file_reference"
+            native_message = (
+                "你是日报正式写作 worker。外层流水线已将本次正式市场摘要的完整原始 prompt "
+                f"逐字写入本地文件：{prompt_artifact_file}\n"
+                f"该文件 UTF-8 文本的 sha256 是：{prompt_artifact_sha256}\n"
+                "请先用工具完整读取该文件，确认内容后严格执行文件内的原始指令并返回同一 JSON 输出契约。"
+                "不得省略、压缩、改写或抽样该文件内容；不得输出 Markdown。"
+            )
+        else:
+            native_message = combined_message
+        cmd = [*base_cmd, "--message", native_message]
+        try:
+            completed = run_openclaw_model_call(
+                cmd,
+                text=True,
+                capture_output=True,
+                timeout=timeout + 30,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            completed_at = now_local()
+            return {
+                "enabled": True,
+                "attempted": True,
+                "started_at": started,
+                "model_started_at": model_started_at.isoformat(timespec="seconds"),
+                "model_completed_at": completed_at.isoformat(timespec="seconds"),
+                "model_duration_ms": int((completed_at - model_started_at).total_seconds() * 1000),
+                "model": model,
+                "agent": agent,
+                "source_input_file": str(source_input_file) if source_input_file else None,
+                "coverage_manifest_file": str(coverage_manifest_file) if coverage_manifest_file else None,
+                "source_item_count": len(all_items),
+                "input_transport": "full_coverage_chunked_messages" if coverage_manifest_file else "single_message_or_file_prompt",
+                "message_count": len(messages),
+                "attempts": attempt,
+                "summary_status": "timeout",
+                "failure_type": "summary_timeout",
+                "error": f"summary generation timed out after {timeout + 30}s",
+                "stderr": str(exc.stderr or "")[-4000:],
+                "stdout": str(exc.output or "")[-4000:],
+            }
         if completed is None:
             last_error = "OpenClaw summary produced no turn"
             transient_retry_sleep(last_error, attempt)
@@ -2848,7 +3747,10 @@ def generate_openclaw_digest(
                     "model": model,
                     "agent": agent,
                     "source_input_file": str(source_input_file) if source_input_file else None,
+                    "coverage_manifest_file": str(coverage_manifest_file) if coverage_manifest_file else None,
                     "source_item_count": len(all_items),
+                    "input_transport": "full_coverage_chunked_messages" if coverage_manifest_file else "single_message_or_file_prompt",
+                    "message_count": len(messages),
                     "attempts": attempt,
                     "summary_status": "gateway_unavailable",
                     "failure_type": "gateway_unavailable",
@@ -2860,6 +3762,9 @@ def generate_openclaw_digest(
             continue
         try:
             data = extract_json_object(completed.stdout)
+            agent_meta = ((data.get("meta") or {}).get("agentMeta") or {})
+            direct_meta = (agent_meta.get("directProvider") or {})
+            execution_trace = ((data.get("meta") or {}).get("executionTrace") or {})
             text = "\n".join(
                 payload.get("text", "")
                 for payload in data.get("payloads", [])
@@ -2884,15 +3789,29 @@ def generate_openclaw_digest(
                 "model_started_at": model_started_at.isoformat(timespec="seconds"),
                 "model_completed_at": completed_at.isoformat(timespec="seconds"),
                 "model_duration_ms": int((completed_at - model_started_at).total_seconds() * 1000),
+                "requested_model": model,
                 "model": model,
+                "resolved_lane": "direct_provider" if direct_meta else "native_openclaw_gateway",
+                "actual_provider_profile": direct_meta.get("provider_profile") or agent_meta.get("provider") or execution_trace.get("winnerProvider"),
+                "actual_model": direct_meta.get("model") or agent_meta.get("model") or execution_trace.get("winnerModel") or model,
+                "direct_provider_compat_used": bool(direct_meta),
+                "fallback_used": bool(execution_trace.get("fallbackUsed")) if execution_trace else None,
+                "runner": execution_trace.get("runner"),
+                "final_body_provenance": "native_openclaw_gateway_gpt" if not direct_meta else "direct_provider_non_gpt_blocker",
                 "agent": agent,
                 "source_input_file": str(source_input_file) if source_input_file else None,
+                "coverage_manifest_file": str(coverage_manifest_file) if coverage_manifest_file else None,
+                "prompt_artifact_file": str(prompt_artifact_file) if prompt_artifact_file else None,
+                "prompt_artifact_sha256": prompt_artifact_sha256,
                 "source_item_count": len(all_items),
+                "input_transport": prompt_transport,
+                "message_count": len(messages),
                 "attempts": attempt,
                 "summary_paragraphs": summary_paragraphs,
                 "quality_warnings": quality_warnings,
                 "sections": digest.get("sections") or {},
                 "observation": digest.get("observation") or {},
+                "coverage_check": digest.get("coverage_check") or {},
                 "usage": (data.get("meta") or {}).get("agentMeta", {}).get("usage"),
             }
         except Exception as exc:  # noqa: BLE001 - retry malformed model output
@@ -2909,7 +3828,10 @@ def generate_openclaw_digest(
         "model": model,
         "agent": agent,
         "source_input_file": str(source_input_file) if source_input_file else None,
+        "coverage_manifest_file": str(coverage_manifest_file) if coverage_manifest_file else None,
         "source_item_count": len(all_items),
+        "input_transport": "full_coverage_chunked_messages" if coverage_manifest_file else "single_message_or_file_prompt",
+        "message_count": len(messages or []),
         "attempts": retries,
         "error": last_error or "OpenClaw summary failed",
     }
@@ -2991,8 +3913,27 @@ def summary_quality_warnings(
         "财经编辑",
         "作为编辑",
         "摘要应该",
+        "原稿",
+        "上一版",
+        "本次修订",
+        "质检",
+        "Ark",
+        "Kimi",
+        "GPT review",
     ]
     backend_hits = [phrase for phrase in backend_phrases if phrase in text]
+    backend_context_patterns = [
+        r"(原稿|上一版|前稿|旧稿).{0,24}(低估|遗漏|未覆盖|没有覆盖|应补|需要补)",
+        r"(被|为)(原稿|上一版|前稿|旧稿).{0,12}(低估|遗漏)",
+        r"(应|需要|建议).{0,12}(补入|加入|写入|纳入).{0,12}(正文|终稿|稿件|报告|段落)",
+        r"(质检|Ark|Kimi|GPT review).{0,24}(认为|建议|指出|采纳|拒绝|修订)",
+        r"(本次修订|修订目标|采纳项|版本对比|内部改稿)",
+    ]
+    backend_hits.extend(
+        match.group(0)
+        for pattern in backend_context_patterns
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE)
+    )
     if backend_hits:
         warnings.append("summary leaks drafting/meta commentary: " + "、".join(backend_hits[:5]))
 
@@ -3184,7 +4125,28 @@ def write_markdown_report(
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def should_block_empty_market_report(*, phase: str, config: dict[str, Any], all_items: list[dict[str, Any]]) -> bool:
+    """Return True when a scheduled market report has no usable content.
+
+    A successful Notion/Telegram delivery is not a successful market brief when
+    the report body is only the deterministic "no items" placeholder.  Smoke
+    runs remain exempt, and an explicit config escape hatch is available for a
+    future consciously-labelled placeholder mode; the default production
+    behavior is to block publication and let the task retry / surface failure.
+    """
+    if phase == "smoke":
+        return False
+    if all_items:
+        return False
+    pipeline_config = config.get("pipeline") or {}
+    return not bool(pipeline_config.get("allow_empty_publication", False))
+
+
 def append_source_health_section(lines: list[str], entries: list[dict[str, Any]]) -> None:
+    # Source-health diagnostics are for manifests/operator review. Do not expose
+    # them in user-facing daily reports unless explicitly requested for debugging.
+    if os.environ.get("OPENCLAW_MARKET_REPORT_SOURCE_HEALTH") != "1":
+        return
     reports = [e.get("feed_health") for e in entries if isinstance(e.get("feed_health"), dict)]
     problem_sources: list[dict[str, Any]] = []
     for report in reports:
@@ -3426,7 +4388,68 @@ def report_title_for_phase(*, report_path: Path, phase: str, phase_label: str) -
     }
     if phase == "smoke":
         return f"{date_label}测试日报"
-    return f"{date_label}{names.get(phase, phase_label)}"
+    variant = report_variant_title(report_path)
+    return f"{date_label}{names.get(phase, phase_label)}{variant}"
+
+
+def report_variant_title(report_path: Path) -> str:
+    stem = report_path.stem.lower()
+    if stem.endswith("_reviewed") or stem.endswith("_review") or stem.endswith("_复核版"):
+        return "复核版"
+    return ""
+
+
+def report_date_title(report_path: Path) -> str:
+    date_token = report_path.stem[:8]
+    try:
+        return dt.datetime.strptime(date_token, "%Y%m%d").strftime("%Y年%m月%d日")
+    except ValueError:
+        return date_token
+
+
+def report_phase_title(*, phase: str, phase_label: str) -> str:
+    names = {
+        "morning": "晨报",
+        "midday": "午报",
+        "close": "收盘报",
+        "night": "晚报",
+    }
+    return names.get(phase, phase_label)
+
+
+def ensure_notion_child_page(
+    *,
+    parent_page_id: str,
+    token: str,
+    title: str,
+    timeout: int,
+) -> dict[str, Any]:
+    existing_page = find_notion_child_page_by_title(
+        parent_page_id=parent_page_id,
+        token=token,
+        title=title,
+        timeout=timeout,
+    )
+    if existing_page and existing_page.get("id"):
+        payload = retrieve_notion_page(str(existing_page["id"]), token, timeout)
+        return {
+            "page_id": str(existing_page["id"]),
+            "url": payload.get("url") or existing_page.get("url"),
+            "created": False,
+        }
+    page = notion_request(
+        method="POST",
+        url="https://api.notion.com/v1/pages",
+        token=token,
+        timeout=timeout,
+        payload={
+            "parent": {"type": "page_id", "page_id": parent_page_id},
+            "properties": {
+                "title": {"title": [{"type": "text", "text": {"content": title}}]}
+            },
+        },
+    )
+    return {"page_id": str(page["id"]), "url": page.get("url"), "created": True}
 
 
 def publish_notion_page(
@@ -3453,7 +4476,9 @@ def publish_notion_page(
         return {"enabled": True, "attempted": False, "reason": f"missing {parent_env}"}
 
     title = report_title_for_phase(report_path=report_path, phase=phase, phase_label=phase_label)
-    publication_key = f"{report_path.stem[:8]}:{phase}"
+    variant_title = report_variant_title(report_path)
+    variant_key = ":reviewed" if variant_title else ""
+    publication_key = f"{report_path.stem[:8]}:{phase}{variant_key}"
     publication_state_path = report_path.parent / "notion_publications.json"
     publication_state: dict[str, Any] = {}
     if publication_state_path.exists():
@@ -3467,6 +4492,47 @@ def publish_notion_page(
     blocks = markdown_to_notion_blocks(markdown)
     timeout = int(notion.get("timeout") or 120)
     started = now_local().isoformat(timespec="seconds")
+
+    if phase != "smoke":
+        date_title = report_date_title(report_path)
+        phase_title = f"{report_phase_title(phase=phase, phase_label=phase_label)}{variant_title}"
+        date_page = ensure_notion_child_page(
+            parent_page_id=parent_page_id,
+            token=token,
+            title=date_title,
+            timeout=timeout,
+        )
+        date_page_id = str(date_page["page_id"])
+        title = phase_title
+        existing_publication_valid = bool(
+            isinstance(existing_publication, dict)
+            and existing_publication.get("page_id")
+            and existing_publication.get("parent_mode") == "date_phase"
+            and existing_publication.get("date_page_id") == date_page_id
+        )
+        if not existing_publication_valid:
+            existing_publication = None
+        existing_phase_page = find_notion_child_page_by_title(
+            parent_page_id=date_page_id,
+            token=token,
+            title=phase_title,
+            timeout=timeout,
+        )
+        if existing_phase_page and existing_phase_page.get("id"):
+            existing_publication = {
+                **(existing_publication or {}),
+                "page_id": str(existing_phase_page["id"]),
+                "url": existing_phase_page.get("url"),
+                "title": phase_title,
+                "parent_mode": "date_phase",
+                "date_page_id": date_page_id,
+                "date_page_url": date_page.get("url"),
+                "date_title": date_title,
+            }
+        else:
+            existing_publication = None
+        parent_page_id = date_page_id
+
     if isinstance(existing_publication, dict) and existing_publication.get("page_id"):
         page_id = str(existing_publication.get("page_id"))
         try:
@@ -3494,6 +4560,9 @@ def publish_notion_page(
                 "url": existing_publication.get("url") or page_payload.get("url"),
                 "title": title,
                 "block_count": len(blocks),
+                "parent_mode": existing_publication.get("parent_mode"),
+                "date_page_id": existing_publication.get("date_page_id"),
+                "date_page_url": existing_publication.get("date_page_url"),
             }
         except Exception as exc:
             return {
@@ -3533,6 +4602,14 @@ def publish_notion_page(
             "updated_at": now_local().isoformat(timespec="seconds"),
             "report_path": str(report_path),
             "discovered_from_notion": True,
+            **(
+                {
+                    "parent_mode": "date_phase",
+                    "date_page_id": parent_page_id,
+                }
+                if phase != "smoke"
+                else {}
+            ),
         }
         try:
             publication_state_path.write_text(
@@ -3584,6 +4661,14 @@ def publish_notion_page(
             "title": title,
             "published_at": now_local().isoformat(timespec="seconds"),
             "report_path": str(report_path),
+            **(
+                {
+                    "parent_mode": "date_phase",
+                    "date_page_id": parent_page_id,
+                }
+                if phase != "smoke"
+                else {}
+            ),
         }
         try:
             publication_state_path.write_text(
@@ -3600,6 +4685,8 @@ def publish_notion_page(
             "page_id": page_id,
             "url": page.get("url"),
             "block_count": len(blocks),
+            "parent_mode": "date_phase" if phase != "smoke" else None,
+            "date_page_id": parent_page_id if phase != "smoke" else None,
             "state_write_error": state_write_error,
         }
     except Exception as exc:  # noqa: BLE001 - Notion delivery should not break collection
@@ -3625,8 +4712,29 @@ def deliver_report(
     telegram = config.get("telegram") or {}
     if not telegram.get("enabled"):
         return {"enabled": False, "attempted": False}
+    if os.environ.get("OPENCLAW_BACKGROUND_SILENT_TELEGRAM") == "1":
+        return {
+            "enabled": True,
+            "attempted": False,
+            "reason": "background_silent_telegram",
+            "provider": "suppressed",
+            "pending_main_notification": True,
+            "status": status,
+            "notion_url": notion_url,
+        }
     if phase == "smoke" and not telegram.get("send_smoke", False):
         return {"enabled": True, "attempted": False, "reason": "smoke delivery disabled"}
+
+    if os.environ.get("MARKET_IMMERSION_SUPPRESS_FAILURE_TELEGRAM") == "1" and status != "complete":
+        return {
+            "enabled": True,
+            "attempted": False,
+            "reason": "failure_telegram_suppressed_for_retry",
+            "provider": "suppressed",
+            "status": status,
+            "notion_url": notion_url,
+            "retry_suppressed": True,
+        }
 
     target = str(telegram.get("target") or "").strip()
     if not target:
@@ -3637,6 +4745,7 @@ def deliver_report(
     status_labels = {
         "complete": "完成",
         "degraded": "部分完成",
+        "delayed": "排队中",
         "failed": "失败",
     }
     status_label = status_labels.get(status, status)
@@ -3645,6 +4754,8 @@ def deliver_report(
         lines.append(f"Notion：{notion_url}")
     elif status == "failed":
         lines.append("未发布到 Notion。")
+    elif status == "delayed":
+        lines.append("后台模型通道排队中，尚未发布到 Notion。")
     else:
         lines.append("Markdown 简报已生成。")
     if reason:
@@ -3802,7 +4913,7 @@ def notify_market_failure(
         phase_label=phase_label,
         report_path=report_path,
         manifest_path=manifest_path,
-        status="failed",
+        status=failure_notification_status(reason),
         reason=reason,
     )
 
@@ -3812,6 +4923,11 @@ def main() -> int:
     parser.add_argument("--config", default="config/market_immersion_config.json")
     parser.add_argument("--phase", default="morning")
     parser.add_argument("--timeout", type=int, default=90)
+    parser.add_argument(
+        "--as-of",
+        default="",
+        help="Historical replay clock in ISO format; default uses current time. Intended for explicit backfill only.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Resume from the existing daily phase manifest when possible")
     parser.add_argument(
@@ -3851,7 +4967,12 @@ def main() -> int:
     if not env.get("MX_APIKEY"):
         raise SystemExit("MX_APIKEY is not available. Check ~/.openclaw/secrets/mx.env")
 
-    started = now_local()
+    as_of = parse_iso(args.as_of)
+    if args.as_of and as_of is None:
+        raise SystemExit(f"Invalid --as-of ISO datetime: {args.as_of}")
+    if as_of and as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=now_local().tzinfo)
+    started = as_of.astimezone(now_local().tzinfo) if as_of else now_local()
     started_iso = started.isoformat(timespec="seconds")
     window_start, window_end, window_source = compute_window(
         phase=args.phase,
@@ -3927,6 +5048,7 @@ def main() -> int:
             previous_manifest = load_json(manifest_path)
         except Exception:
             previous_manifest = {}
+    digest_result_path = checkpoints_dir / "openclaw_summary.json"
     force_from = args.from_stage or ""
     stop_after = args.stop_after or ""
     stage_order = ["collect", "classify", "digest", "quality_check", "render", "publish", "notify"]
@@ -3944,34 +5066,101 @@ def main() -> int:
         ],
     }
 
+    def is_valid_reusable_digest(summary: dict[str, Any]) -> bool:
+        if not summary:
+            return False
+        summary_config = config.get("openclaw_summary") or {}
+        valid_transports = {"full_coverage_chunked_messages", "artifact_file_reference"}
+        return bool(
+            not summary.get("degraded")
+            and not summary.get("error")
+            and (summary.get("summary_status") or "ok") not in {"degraded_fallback", "timeout", "gateway_unavailable"}
+            and summary.get("failure_type") not in {"summary_timeout", "gateway_unavailable", "provider_timeout"}
+            and summary.get("agent") == str(summary_config.get("agent") or "daily-writer")
+            and summary.get("model") == str(summary_config.get("model") or "openai-codex/gpt-5.5")
+            and summary.get("input_transport") in valid_transports
+            and bool(summary.get("coverage_manifest_file"))
+            and (str(summary_config.get("input_mode") or "full_file") != "full_file" or bool(summary.get("source_input_file")))
+            and bool(summary.get("summary_paragraphs"))
+        )
+
+    def load_reusable_digest_result() -> dict[str, Any]:
+        candidates: list[Path] = []
+        if isinstance(previous_manifest.get("openclaw_summary_file"), str):
+            candidates.append(Path(str(previous_manifest.get("openclaw_summary_file"))))
+        digest_meta_path = checkpoints_dir / "digest.json"
+        if digest_meta_path.exists():
+            try:
+                digest_meta = load_json(digest_meta_path)
+                if isinstance(digest_meta.get("openclaw_summary_file"), str):
+                    candidates.append(Path(str(digest_meta.get("openclaw_summary_file"))))
+            except Exception:
+                pass
+        candidates.append(digest_result_path)
+        for candidate in candidates:
+            try:
+                if candidate.exists():
+                    loaded = load_json(candidate)
+                    if is_valid_reusable_digest(loaded):
+                        return loaded
+            except Exception:
+                continue
+        return {}
+
+    reusable_digest_result = load_reusable_digest_result()
+    if reusable_digest_result and not previous_manifest.get("openclaw_summary"):
+        previous_manifest["openclaw_summary"] = reusable_digest_result
+        previous_manifest.setdefault("openclaw_summary_file", str(digest_result_path))
+
+    def persist_openclaw_summary(summary: dict[str, Any]) -> Path:
+        digest_result_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        return digest_result_path
+
     def can_reuse(stage: str) -> bool:
         if not previous_manifest:
             return False
         if force_from:
+            if stage == "digest" and stage_order.index(stage) < stage_order.index(force_from):
+                return is_valid_reusable_digest(previous_manifest.get("openclaw_summary") or {})
             return stage_order.index(stage) < stage_order.index(force_from)
         previous_summary = previous_manifest.get("openclaw_summary") or {}
         previous_validation = previous_manifest.get("validation") or {}
         previous_requires_formal_retry = bool(
             previous_summary.get("degraded")
             or previous_summary.get("summary_status") == "degraded_fallback"
+            or previous_summary.get("summary_status") in {"timeout", "gateway_unavailable"}
+            or previous_summary.get("failure_type") in {"summary_timeout", "gateway_unavailable", "provider_timeout"}
+            or previous_summary.get("error")
             or previous_validation.get("requires_formal_retry")
             or previous_validation.get("formal_digest") is False
         )
         summary_config = config.get("openclaw_summary") or {}
+        valid_summary_transports = {"full_coverage_chunked_messages", "artifact_file_reference"}
         previous_summary_contract_mismatch = bool(
             previous_summary
             and stage_order.index(stage) >= stage_order.index("digest")
             and (
                 previous_summary.get("agent") != str(summary_config.get("agent") or "daily-writer")
                 or previous_summary.get("model") != str(summary_config.get("model") or "openai-codex/gpt-5.5")
+                or previous_summary.get("input_transport") not in valid_summary_transports
+                or not previous_summary.get("coverage_manifest_file")
                 or (
                     str(summary_config.get("input_mode") or "full_file") == "full_file"
                     and not previous_summary.get("source_input_file")
                 )
+                or (stage == "digest" and not is_valid_reusable_digest(previous_summary))
             )
         )
         if (previous_requires_formal_retry or previous_summary_contract_mismatch) and stage_order.index(stage) >= stage_order.index("digest"):
             return False
+        if stage_order.index(stage) >= stage_order.index("quality_check"):
+            qc_config = config.get("raw_flow_quality_check") or {}
+            previous_qc = previous_manifest.get("raw_flow_quality_check") or {}
+            if previous_qc and (
+                previous_qc.get("mode") != str(qc_config.get("mode") or "large_context")
+                or previous_qc.get("model") != str(qc_config.get("model") or "kimi-k2.6")
+            ):
+                return False
         return args.resume
 
     entries: list[dict[str, Any]] = []
@@ -4220,6 +5409,7 @@ def main() -> int:
                     "model_duration_ms": openclaw_digest.get("model_duration_ms"),
                 },
             }
+    openclaw_summary_file = persist_openclaw_summary(openclaw_digest)
     write_checkpoint(
         "digest",
         {
@@ -4233,6 +5423,14 @@ def main() -> int:
             "model": openclaw_digest.get("model"),
             "agent": openclaw_digest.get("agent"),
             "source_input_file": openclaw_digest.get("source_input_file"),
+            "coverage_manifest_file": openclaw_digest.get("coverage_manifest_file"),
+            "input_transport": openclaw_digest.get("input_transport"),
+            "prompt_artifact_file": openclaw_digest.get("prompt_artifact_file"),
+            "prompt_artifact_sha256": openclaw_digest.get("prompt_artifact_sha256"),
+            "fallback_used": bool(openclaw_digest.get("fallback_used")),
+            "runner": openclaw_digest.get("runner"),
+            "openclaw_summary_file": str(openclaw_summary_file),
+            "message_count": openclaw_digest.get("message_count"),
             "source_item_count": openclaw_digest.get("source_item_count"),
             "error": openclaw_digest.get("error"),
             "stderr": openclaw_digest.get("stderr"),
@@ -4256,6 +5454,7 @@ def main() -> int:
             "auxiliary_flow_checks": auxiliary_flow_checks,
             "raw_flow_classification": raw_flow_classification,
             "openclaw_summary": openclaw_digest,
+            "openclaw_summary_file": str(openclaw_summary_file),
             "validation": {
                 "published": False,
                 "delivery_blocked": True,
@@ -4292,6 +5491,7 @@ def main() -> int:
             "auxiliary_flow_checks": auxiliary_flow_checks,
             "raw_flow_classification": raw_flow_classification,
             "openclaw_summary": openclaw_digest,
+            "openclaw_summary_file": str(openclaw_summary_file),
             "validation": {
                 "degraded": True,
                 "published": False,
@@ -4318,6 +5518,80 @@ def main() -> int:
             checkpoint_path=checkpoints_dir / "digest.json",
             artifacts=[manifest_path, report_path, error_path],
             needs_review=False,
+        )
+        background_tasks.queue_notification(
+            background_task_id,
+            kind="market_failed",
+            title=f"{day}{run_def['label']}未发布",
+            summary=error_summary,
+            severity="warning",
+            artifact_paths=[manifest_path, report_path, error_path],
+        )
+        return 3
+
+    if should_block_empty_market_report(phase=args.phase, config=config, all_items=all_items):
+        error_summary = "市场简讯采集结果为空；空占位稿不得作为正式简报发布。"
+        manifest = {
+            "version": 1,
+            "phase": args.phase,
+            "phase_label": run_def["label"],
+            "started_at": started_iso,
+            "run_slug": run_slug,
+            "attempt_slug": attempt_slug,
+            "window": window,
+            "config_path": str(config_path),
+            "checkpoints_dir": str(checkpoints_dir),
+            "dag": dag_spec,
+            "entries": entries,
+            "auxiliary_flow_checks": auxiliary_flow_checks,
+            "raw_flow_classification": raw_flow_classification,
+            "openclaw_summary": openclaw_digest,
+            "openclaw_summary_file": str(openclaw_summary_file),
+            "validation": {
+                "published": False,
+                "delivery_blocked": True,
+                "reason": error_summary,
+                "empty_report": True,
+                "item_count": 0,
+            },
+            "checkpoint": "empty_report_blocked",
+        }
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        report_path.write_text(
+            "## 信息汇总\n\n市场简讯采集结果为空；本轮不发布 Notion，也不按完成推送 Telegram。\n",
+            encoding="utf-8",
+        )
+        failure_delivery = notify_market_failure(
+            config=config,
+            phase=args.phase,
+            phase_label=run_def["label"],
+            report_path=report_path,
+            manifest_path=manifest_path,
+            reason=error_summary,
+        )
+        manifest["delivery"] = failure_delivery
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        error_path = background_tasks.write_error(
+            background_task_id,
+            error_kind="no_market_items_collected",
+            error_summary=error_summary,
+            details={"checkpoint": "empty_report_blocked", "item_count": 0},
+        )
+        background_tasks.fail_task(
+            background_task_id,
+            error_kind="no_market_items_collected",
+            error_summary=error_summary,
+            checkpoint_path=manifest_path,
+            artifacts=[manifest_path, report_path, error_path],
+            needs_review=False,
+        )
+        background_tasks.queue_notification(
+            background_task_id,
+            kind="market_failed",
+            title=f"{day}{run_def['label']}未发布",
+            summary=error_summary,
+            severity="warning",
+            artifact_paths=[manifest_path, report_path, error_path],
         )
         return 3
 
@@ -4346,6 +5620,7 @@ def main() -> int:
             "auxiliary_flow_checks": auxiliary_flow_checks,
             "raw_flow_classification": raw_flow_classification,
             "openclaw_summary": openclaw_digest,
+            "openclaw_summary_file": str(openclaw_summary_file),
             "checkpoint": "digest_failed",
         }
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -4378,8 +5653,24 @@ def main() -> int:
             artifacts=[manifest_path, report_path, error_path],
             needs_review=False,
         )
+        background_tasks.queue_notification(
+            background_task_id,
+            kind="market_failed",
+            title=f"{day}{run_def['label']}未发布",
+            summary=sanitize_user_reason(str(openclaw_digest.get("error") or "empty summary")),
+            severity="warning",
+            artifact_paths=[manifest_path, report_path, error_path],
+        )
         return 3
 
+    write_checkpoint(
+        "quality_check",
+        {
+            "status": "started",
+            "reused_digest": bool(can_reuse("digest")),
+            "openclaw_summary_file": str(openclaw_summary_file),
+        },
+    )
     if can_reuse("quality_check") and previous_manifest.get("raw_flow_quality_check"):
         raw_flow_quality_check = previous_manifest.get("raw_flow_quality_check") or {}
     else:
@@ -4421,6 +5712,7 @@ def main() -> int:
     )
     if revised_digest is not openclaw_digest:
         openclaw_digest = revised_digest
+        openclaw_summary_file = persist_openclaw_summary(openclaw_digest)
         write_checkpoint(
             "digest",
             {
@@ -4431,6 +5723,13 @@ def main() -> int:
                 "model": openclaw_digest.get("model"),
                 "agent": openclaw_digest.get("agent"),
                 "source_input_file": openclaw_digest.get("source_input_file"),
+                "coverage_manifest_file": openclaw_digest.get("coverage_manifest_file"),
+                "input_transport": openclaw_digest.get("input_transport"),
+                "prompt_artifact_file": openclaw_digest.get("prompt_artifact_file"),
+                "prompt_artifact_sha256": openclaw_digest.get("prompt_artifact_sha256"),
+                "fallback_used": bool(openclaw_digest.get("fallback_used")),
+                "runner": openclaw_digest.get("runner"),
+                "openclaw_summary_file": str(openclaw_summary_file),
                 "source_item_count": openclaw_digest.get("source_item_count"),
                 "ark_review_decisions": openclaw_digest.get("ark_review_decisions"),
                 "ark_review_decision_error": openclaw_digest.get("ark_review_decision_error"),
@@ -4452,6 +5751,7 @@ def main() -> int:
         "auxiliary_flow_checks": auxiliary_flow_checks,
         "raw_flow_classification": raw_flow_classification,
         "openclaw_summary": openclaw_digest,
+        "openclaw_summary_file": str(openclaw_summary_file),
         "raw_flow_quality_check": raw_flow_quality_check,
         "validation": {
             "degraded": bool(openclaw_digest.get("degraded")),
@@ -4600,15 +5900,48 @@ def main() -> int:
     elif validation_degraded:
         delivery_reason = "部分数据源失败，已用可用信息发布降级版"
     previous_delivery = previous_manifest.get("delivery") if isinstance(previous_manifest.get("delivery"), dict) else {}
+    if not previous_delivery:
+        notify_checkpoint_path = checkpoints_dir / "notify.json"
+        if notify_checkpoint_path.exists():
+            try:
+                notify_checkpoint = load_json(notify_checkpoint_path)
+                if isinstance(notify_checkpoint, dict):
+                    previous_delivery = {
+                        "attempted": notify_checkpoint.get("attempted"),
+                        "returncode": notify_checkpoint.get("returncode"),
+                        "exception": notify_checkpoint.get("exception"),
+                        "notion_url": notify_checkpoint.get("notion_url"),
+                        "status": notify_checkpoint.get("delivery_status"),
+                        "reason": notify_checkpoint.get("reason"),
+                    }
+            except Exception:
+                previous_delivery = {}
     previous_delivery_failed = bool(
-        previous_delivery.get("exception")
+        previous_delivery.get("attempted") is False
+        or previous_delivery.get("reason") == "background_silent_telegram"
+        or previous_delivery.get("exception")
         or (previous_delivery.get("returncode") is not None and int(previous_delivery.get("returncode") or 0) != 0)
     )
+    previous_delivery_message = str(previous_delivery.get("message") or "")
+    previous_delivery_reason = str(previous_delivery.get("reason") or "")
     previous_delivery_matches = bool(
         previous_delivery
-        and previous_delivery.get("notion_url")
-        and previous_delivery.get("notion_url") == notion_delivery.get("url")
         and previous_delivery.get("status") == delivery_status
+        and (
+            (
+                previous_delivery.get("notion_url")
+                and previous_delivery.get("notion_url") == notion_delivery.get("url")
+            )
+            or (
+                delivery_status == "failed"
+                and not notion_delivery.get("url")
+                and (
+                    not delivery_reason
+                    or previous_delivery_reason == delivery_reason
+                    or sanitize_user_reason(delivery_reason) in previous_delivery_message
+                )
+            )
+        )
     )
     if can_reuse("notify") and previous_delivery and not previous_delivery_failed and previous_delivery_matches:
         delivery = previous_delivery or {}
@@ -4632,6 +5965,8 @@ def main() -> int:
             "returncode": delivery.get("returncode"),
             "exception": delivery.get("exception"),
             "notion_url": notion_delivery.get("url"),
+            "delivery_status": delivery_status,
+            "reason": delivery_reason,
             "formal": not bool(openclaw_digest.get("degraded")),
             "requires_formal_retry": bool(openclaw_digest.get("degraded")),
         },
@@ -4640,6 +5975,9 @@ def main() -> int:
     manifest["delivery"] = delivery
     if isinstance(manifest.get("validation"), dict):
         manifest["validation"]["published"] = bool(notion_delivery.get("attempted") and not notion_delivery.get("error"))
+        if manifest["validation"]["published"] and not delivery_failed_for_checkpoint:
+            manifest["validation"]["delivery_blocked"] = False
+            manifest["validation"].pop("requires_formal_retry", None)
     if notion_publish_failed:
         manifest["checkpoint"] = "publish_failed"
     elif delivery_failed_for_checkpoint:
@@ -4671,6 +6009,14 @@ def main() -> int:
                 artifacts=[manifest_path, report_path],
                 needs_review=False,
             )
+            background_tasks.queue_notification(
+                background_task_id,
+                kind="market_delivery_failed",
+                title=f"{day}{run_def['label']}通知失败",
+                summary="Telegram Notion 链接通知失败，前序产物已生成。",
+                severity="warning",
+                artifact_paths=[manifest_path, report_path, checkpoints_dir / "notify.json"],
+            )
             return 7
     if args.phase != "smoke" and notion_config.get("enabled"):
         if notion_publish_failed:
@@ -4687,6 +6033,14 @@ def main() -> int:
                     artifacts=[manifest_path, report_path],
                     needs_review=True,
                 )
+                background_tasks.queue_notification(
+                    background_task_id,
+                    kind="market_needs_review",
+                    title=f"{day}{run_def['label']}需要审核",
+                    summary=sanitize_user_reason(str(notion_delivery.get("error") or notion_delivery.get("reason") or "")),
+                    severity="error",
+                    artifact_paths=[manifest_path, report_path, checkpoints_dir / "publish.json"],
+                )
                 return 3
             background_tasks.fail_task(
                 background_task_id,
@@ -4695,6 +6049,14 @@ def main() -> int:
                 checkpoint_path=checkpoints_dir / "publish.json",
                 artifacts=[manifest_path, report_path],
                 needs_review=False,
+            )
+            background_tasks.queue_notification(
+                background_task_id,
+                kind="market_failed",
+                title=f"{day}{run_def['label']}未发布",
+                summary=sanitize_user_reason(str(notion_delivery.get("error") or notion_delivery.get("reason") or "not attempted")),
+                severity="warning",
+                artifact_paths=[manifest_path, report_path, checkpoints_dir / "publish.json"],
             )
             return 6
     if args.phase != "smoke":
@@ -4721,12 +6083,28 @@ def main() -> int:
             artifacts=[manifest_path, report_path, checkpoints_dir / "publish.json", checkpoints_dir / "notify.json"],
             needs_review=False,
         )
+        background_tasks.queue_notification(
+            background_task_id,
+            kind="market_failed",
+            title=f"{day}{run_def['label']}未发布",
+            summary="当前只生成了降级摘要占位，不满足正式简报要求；等待 supervisor 后续重跑正式 digest。",
+            severity="warning",
+            artifact_paths=[manifest_path, report_path, checkpoints_dir / "publish.json", checkpoints_dir / "notify.json"],
+        )
     else:
         background_tasks.finish_task(
             background_task_id,
             artifacts=[manifest_path, report_path, checkpoints_dir / "publish.json", checkpoints_dir / "notify.json"],
             summary=f"{day}{run_def['label']}完成；Notion={notion_delivery.get('url') or ''}",
             main_review_required=True,
+        )
+        background_tasks.queue_notification(
+            background_task_id,
+            kind="market_completed",
+            title=f"{day}{run_def['label']}完成",
+            summary=f"Notion={notion_delivery.get('url') or ''}",
+            severity="info",
+            artifact_paths=[manifest_path, report_path, checkpoints_dir / "publish.json", checkpoints_dir / "notify.json"],
         )
     return 0
 

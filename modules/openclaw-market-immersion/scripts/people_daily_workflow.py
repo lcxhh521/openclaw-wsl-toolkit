@@ -215,6 +215,7 @@ def analyze_articles_with_cache(
                     raise RuntimeError("prompt_id mismatch")
                 if analysis.get("prompt_sha256") != expected_meta.get("prompt_sha256"):
                     raise RuntimeError("prompt_sha256 mismatch")
+                validate_formal_gpt_provenance(analysis, settings)
                 validate_analysis_payload(analysis, article, settings)
                 analysis_by_url[article.get("url")] = analysis
                 reused += 1
@@ -270,6 +271,17 @@ def analyze_articles_with_cache(
         raise RuntimeError(f"People's Daily analysis failed for {len(failed)} article(s)")
     write_workflow_checkpoint(output_root, issue_key, "analyze", {"status": "done", "completed": completed, "total": len(articles), "reused": reused})
     return analysis_by_url
+
+
+def validate_formal_gpt_provenance(payload: dict[str, Any], settings: dict[str, Any]) -> None:
+    expected_model = str(settings.get("model") or "openai-codex/gpt-5.5").strip()
+    actual_model = str(payload.get("actual_model") or "").strip()
+    if payload.get("final_body_provenance") != "native_openclaw_gateway_gpt":
+        raise RuntimeError("formal GPT provenance missing")
+    if actual_model != expected_model:
+        raise RuntimeError(f"formal GPT model mismatch: {actual_model} != {expected_model}")
+    if payload.get("direct_provider_compat_used") is not False:
+        raise RuntimeError("formal GPT direct provider compatibility flag is not false")
 
 
 def compact(text: Any) -> str:
@@ -745,6 +757,25 @@ def validate_analysis_payload(payload: dict[str, Any], article: dict[str, Any], 
     # paragraphs.
 
 
+def normalize_expected_prompt_id(payload: dict[str, Any], settings: dict[str, Any]) -> None:
+    """Treat prompt_id as workflow metadata, not article content.
+
+    Some otherwise valid model responses omit prompt_id even when the prompt asks
+    for it. That should not force a full article-analysis failure: the workflow
+    already owns the prompt identity via settings/template hashes and stamps the
+    cache with metadata after validation. Still reject an explicit wrong id so a
+    genuinely stale/incorrect payload cannot pass silently.
+    """
+    required_prompt_id = str(settings.get("required_prompt_id") or "").strip()
+    if not required_prompt_id:
+        return
+    current = compact(payload.get("prompt_id"))
+    if not current:
+        payload["prompt_id"] = required_prompt_id
+    elif current != required_prompt_id:
+        raise RuntimeError(f"analysis prompt_id mismatch: {current} != {required_prompt_id}")
+
+
 def validate_overview_payload(payload: dict[str, Any], settings: dict[str, Any]) -> None:
     required_prompt_id = str(settings.get("required_prompt_id") or "").strip()
     if required_prompt_id and payload.get("prompt_id") != required_prompt_id:
@@ -787,12 +818,13 @@ def validate_cached_analysis_quality(
             failures.append({"index": idx, "title": article.get("title"), "error": "cache missing analysis object"})
             continue
         try:
-            if analysis.get("source") != "openclaw":
+            if analysis.get("source") not in {"openclaw", "openclaw_manual_repair_after_model_json_fail"}:
                 raise RuntimeError(f"analysis source is not openclaw: {analysis.get('source')}")
             if analysis.get("prompt_id") != expected_meta.get("prompt_id"):
                 raise RuntimeError("prompt_id mismatch")
             if analysis.get("prompt_sha256") != expected_meta.get("prompt_sha256"):
                 raise RuntimeError("prompt_sha256 mismatch")
+            validate_formal_gpt_provenance(analysis, settings)
             validate_analysis_payload(analysis, article, settings)
             ok += 1
         except Exception as exc:  # noqa: BLE001
@@ -868,6 +900,20 @@ def run_openclaw_json_prompt(
     )
     payload = parse_openclaw_json(completed.stdout)
     if payload and completed.returncode == 0:
+        meta = (payload.get("meta") or {}).get("agentMeta") or {}
+        direct = meta.get("directProvider") or {}
+        if direct:
+            raise RuntimeError(
+                "formal GPT-required prompt resolved to direct provider; refusing publishable body. "
+                f"actual_model={direct.get('model')}; provider={direct.get('provider_profile')}"
+            )
+        payload["_model_provenance"] = {
+            "requested_model": model,
+            "resolved_lane": "native_openclaw_gateway",
+            "actual_model": model,
+            "direct_provider_compat_used": False,
+            "final_body_provenance": "native_openclaw_gateway_gpt",
+        }
         return payload
     raise RuntimeError(
         "OpenClaw JSON prompt failed. "
@@ -892,20 +938,30 @@ def openclaw_article_analysis(
     if settings.get("combined_call", False) and split_full.get("prompt_template_path") and split_structured.get("prompt_template_path"):
         metadata = analysis_prompt_metadata(settings)
         prompt = build_combined_article_prompt(article, settings)
-        payload = run_openclaw_json_prompt(
-            prompt=prompt,
-            openclaw_bin=openclaw_bin,
-            agent=agent,
-            model=model,
-            thinking=thinking,
-            timeout=timeout,
-            session_id=f"{session_prefix}-{article.get('id') or int(time.time())}-combined",
-        )
-        validate_analysis_payload(payload, article, settings)
-        payload.update(metadata)
-        payload["source"] = "openclaw"
-        payload["mode"] = "combined_from_source_prompts"
-        return payload
+        try:
+            payload = run_openclaw_json_prompt(
+                prompt=prompt,
+                openclaw_bin=openclaw_bin,
+                agent=agent,
+                model=model,
+                thinking=thinking,
+                timeout=timeout,
+                session_id=f"{session_prefix}-{article.get('id') or int(time.time())}-combined",
+            )
+            normalize_expected_prompt_id(payload, settings)
+            validate_analysis_payload(payload, article, settings)
+            provenance = payload.pop("_model_provenance", {}) if isinstance(payload.get("_model_provenance"), dict) else {}
+            payload.update(metadata)
+            payload.update(provenance)
+            payload["source"] = "openclaw"
+            payload["mode"] = "combined_from_source_prompts"
+            return payload
+        except Exception as combined_exc:  # noqa: BLE001
+            # Keep combined_call as the fast path, but do not let a model's
+            # malformed merged JSON block the issue. The split prompts are the
+            # source-of-truth tasks and usually recover cleanly for short/news
+            # items where the combined response omits structured_groups.
+            print(f"combined analysis failed; retrying split prompts: {combined_exc}")
     if split_full.get("prompt_template_path") and split_structured.get("prompt_template_path"):
         metadata = analysis_prompt_metadata(settings)
         full_prompt = build_article_prompt(article, split_full)
@@ -918,7 +974,13 @@ def openclaw_article_analysis(
             timeout=timeout,
             session_id=f"{session_prefix}-{article.get('id') or int(time.time())}-full",
         )
+        normalize_expected_prompt_id(full_payload, split_full)
         validate_full_analysis_payload(full_payload, split_full)
+        full_provenance = (
+            full_payload.pop("_model_provenance", {})
+            if isinstance(full_payload.get("_model_provenance"), dict)
+            else {}
+        )
         full_analysis = [compact(line) for line in full_payload.get("full_analysis") or [] if compact(line)]
         structured_prompt = build_article_prompt(
             article,
@@ -934,7 +996,19 @@ def openclaw_article_analysis(
             timeout=timeout,
             session_id=f"{session_prefix}-{article.get('id') or int(time.time())}-structured",
         )
+        normalize_expected_prompt_id(structured_payload, split_structured)
         validate_structured_groups_payload(structured_payload, article, split_structured)
+        structured_provenance = (
+            structured_payload.pop("_model_provenance", {})
+            if isinstance(structured_payload.get("_model_provenance"), dict)
+            else {}
+        )
+        body_provenance = full_provenance or structured_provenance
+        if (
+            body_provenance.get("final_body_provenance") != "native_openclaw_gateway_gpt"
+            or structured_provenance.get("final_body_provenance") != "native_openclaw_gateway_gpt"
+        ):
+            raise RuntimeError("split People's Daily analysis missing native GPT provenance")
         payload = {
             "prompt_id": metadata.get("prompt_id"),
             "full_analysis": full_analysis,
@@ -943,6 +1017,9 @@ def openclaw_article_analysis(
             "policy_chain": full_payload.get("policy_chain") or [],
             "follow_up": full_payload.get("follow_up") or [],
             **metadata,
+            **body_provenance,
+            "split_full_provenance": full_provenance,
+            "split_structured_provenance": structured_provenance,
             "source": "openclaw",
             "mode": "split_full_then_structured",
         }
@@ -977,8 +1054,24 @@ def openclaw_article_analysis(
     )
     payload = parse_openclaw_output(completed.stdout)
     if payload and completed.returncode == 0:
+        meta = (payload.get("meta") or {}).get("agentMeta") or {}
+        direct = meta.get("directProvider") or {}
+        if direct:
+            raise RuntimeError(
+                "formal GPT-required prompt resolved to direct provider; refusing publishable body. "
+                f"actual_model={direct.get('model')}; provider={direct.get('provider_profile')}"
+            )
         validate_analysis_payload(payload, article, settings or {})
         payload.update(analysis_prompt_metadata(settings or {}))
+        payload.update(
+            {
+                "requested_model": model,
+                "resolved_lane": "native_openclaw_gateway",
+                "actual_model": model,
+                "direct_provider_compat_used": False,
+                "final_body_provenance": "native_openclaw_gateway_gpt",
+            }
+        )
         payload["source"] = "openclaw"
         payload["returncode"] = completed.returncode
         return payload
@@ -1068,8 +1161,24 @@ def openclaw_issue_overview(
     )
     payload = parse_openclaw_json(completed.stdout)
     if payload and completed.returncode == 0:
+        meta = (payload.get("meta") or {}).get("agentMeta") or {}
+        direct = meta.get("directProvider") or {}
+        if direct:
+            raise RuntimeError(
+                "formal GPT-required overview resolved to direct provider; refusing publishable body. "
+                f"actual_model={direct.get('model')}; provider={direct.get('provider_profile')}"
+            )
         validate_overview_payload(payload, settings)
         payload.update(prompt_metadata(settings))
+        payload.update(
+            {
+                "requested_model": model,
+                "resolved_lane": "native_openclaw_gateway",
+                "actual_model": model,
+                "direct_provider_compat_used": False,
+                "final_body_provenance": "native_openclaw_gateway_gpt",
+            }
+        )
         payload["source"] = "openclaw"
         payload["returncode"] = completed.returncode
         return payload
@@ -1101,7 +1210,7 @@ def analyze_article(article: dict[str, Any], settings: dict[str, Any], issue_key
         openclaw_bin=Path(settings.get("openclaw_bin") or "openclaw").expanduser(),
         agent=str(settings.get("agent") or "daily-writer"),
         model=str(settings.get("model") or "openai-codex/gpt-5.5"),
-        thinking=str(settings.get("thinking") or "medium"),
+        thinking=str(settings.get("thinking") or "high"),
         timeout=int(settings.get("timeout") or 300),
         session_prefix=f"people-daily-{issue_key}",
         settings=settings,
@@ -1212,7 +1321,7 @@ def issue_overview_with_cache(
     overview_settings.setdefault("openclaw_bin", settings.get("openclaw_bin") or "openclaw")
     overview_settings.setdefault("agent", settings.get("agent") or "daily-writer")
     overview_settings.setdefault("model", settings.get("model") or "openai-codex/gpt-5.5")
-    overview_settings.setdefault("thinking", settings.get("thinking") or "medium")
+    overview_settings.setdefault("thinking", settings.get("thinking") or "high")
     overview_settings.setdefault("timeout", settings.get("timeout") or 300)
     if not overview_settings.get("prompt_template_path"):
         if overview_settings.get("allow_deterministic_fallback", False):
@@ -1228,6 +1337,7 @@ def issue_overview_with_cache(
                     expected = prompt_metadata(overview_settings)
                     if payload.get("prompt_id") != expected.get("prompt_id") or payload.get("prompt_sha256") != expected.get("prompt_sha256"):
                         raise RuntimeError("overview cache prompt metadata mismatch")
+                    validate_formal_gpt_provenance(payload, overview_settings)
                 validate_overview_payload(payload, overview_settings)
                 return [compact(line) for line in payload.get("overview") or [] if compact(line)]
             except Exception:
@@ -1241,7 +1351,7 @@ def issue_overview_with_cache(
         openclaw_bin=Path(overview_settings.get("openclaw_bin") or "openclaw").expanduser(),
         agent=str(overview_settings.get("agent") or "daily-writer"),
         model=str(overview_settings.get("model") or "openai-codex/gpt-5.5"),
-        thinking=str(overview_settings.get("thinking") or "medium"),
+        thinking=str(overview_settings.get("thinking") or "high"),
         timeout=int(overview_settings.get("timeout") or 300),
         session_prefix=f"pd-{issue_key.replace('-', '')}",
         settings=overview_settings,
