@@ -117,12 +117,19 @@ Windows
         |   |-- OpenClawMonitor.ico
         |   `-- README.md
         |-- openclaw-netwatch/
-        |-- wsl-safe/
         |   |-- openclaw-netwatch
         |   |-- openclaw-netwatch.service
         |   |-- openclaw-netwatch.timer
         |   |-- Install-OpenClawNetwatch.ps1
         |   |-- Uninstall-OpenClawNetwatch.ps1
+        |   `-- README.md
+        |-- wsl-safe/
+        |   |-- Install-InvokeWslSafe.ps1
+        |   |-- Invoke-StableWsl.ps1
+        |   |-- Invoke-WslSafe.ps1
+        |   |-- Invoke-WslScript.ps1
+        |   |-- Start-WslKeepalive.ps1
+        |   |-- WslUtf8Bridge.ps1
         |   `-- README.md
         |-- openclaw-doubao-asr/
         |   |-- openclaw-doubao-asr
@@ -342,16 +349,23 @@ journalctl --user -u openclaw-market-immersion-morning.service -n 100 --no-pager
 
 ### 数据源健康、备用接口与禁止降级发布
 
-模块现在把“数据源失效处理”和“禁止自动降级发布”分开写清楚：
+模块现在把“数据源失效处理”和“禁止自动降级发布”分开写清楚。当前已经实现的是：
 
 - `allow_degraded_publication` 默认并应保持为 `false`；缺源、跳过失败源或发布不完整日报都需要用户明确批准。
-- 每次抓取会生成 `source_health`，列出失败/窗口不足的数据源、错误原因、可用备用接口和建议动作；该信息默认只留在 manifest/operator diagnostics，不进入用户可见日报，除非显式开启调试输出。
-- 备用方案不是高频本地快照，而是 `config/source_registry.json` 维护的当前主源接口注册表；公开仓库只发布当前主源，不发布额外备用接口候选。
-- `scripts/verify_source_interfaces.py` 会低频验证候选接口是否与官方网站展示一致；只有验证通过且不是当前 primary 的候选才可作为真正的 `backup_ready`。
+- 每次抓取会生成 `source_health`，列出失败/窗口不足的数据源、错误原因、已有验证结果和建议动作；该信息默认只留在 manifest/operator diagnostics，不进入用户可见日报，除非显式开启调试输出。
+- 备用候选来自 `config/source_registry.json` 中已配置的接口；公开仓库只发布当前主源，不发布额外私有候选。
+- `scripts/verify_source_interfaces.py` 会低频验证 `config/source_registry.json` 中已配置的候选接口是否与官方网站展示一致；只有验证通过且不是当前 primary 的候选才可作为真正的 `backup_ready`。
 - `openclaw-source-interface-verification.timer` 默认每月 1 日和 16 日 07:05 CST 运行一次，用于常备验证，不发布日报、不替换主源。
-- 实际日报抓取始终主源优先；主源失败或窗口覆盖不足时，应先尝试已验证备用接口补齐/替代，下一轮主源恢复后自动切回主源。
-- 若没有已验证备用接口，不要把内部健康检查块混入正文；可以先发布一版**降级日报**，但格式必须与正常日报一致，只在开头用简短提示说明“本版暂未覆盖哪些源/时间窗口”。随后立即启动备用接口搜索/验证；找到可用替代源后，发布一版**缺失源补充简报**。
-- **缺失源补充简报**复用正常每日简讯流程和版式，但范围只限此前缺失源/缺失窗口：顶部要有“仅补充 X 版降级日报缺失的 Y 源/Z 时间段”说明；「信息汇总」不是全日/全市场判断，而是只对这部分补回信息做有边界的总结，不能推出超出缺失源范围的判断；「原始消息流」仍按正常信息流形式列出补回的全部原始信息。
+- 实际日报抓取仍主源优先；当前运行态会读取最近一次 verification，并在 manifest/operator diagnostics 中标记哪些源有 `backup_ready` 候选。
+
+尚未完整自动化、仍属设计目标的是：
+
+- 主源失败或窗口覆盖不足时，自动使用已验证备用接口补齐/替代。
+- 主源恢复后自动 failback。
+- 无已验证备用接口时，自动搜索、验证新接口。
+- 找到可用替代源后，自动生成并发布“缺失源补充简报”。
+
+在这些能力落地前，缺源、补源或补充版发布应走人工确认或独立 Gate，不应把内部健康检查块混入普通正文。
 
 `openclaw-market-feed-snapshot.timer` 不作为默认方案启用；只有在主要接口失效且暂时找不到替代接口时，才可临时开启快照兜底。具体设计见 `modules/openclaw-market-immersion/docs/source_interface_failover.md`。
 
@@ -495,7 +509,7 @@ systemctl --user enable --now openclaw-people-daily-deep-read.timer
 systemctl --user enable --now openclaw-source-interface-verification.timer
 ```
 
-`openclaw-market-feed-snapshot.timer` 是接口失效且暂无可用备用接口时的临时兜底快照，不默认启用；正常情况下依赖主源优先、已验证备用接口临时 failover、主源恢复后自动 failback。
+`openclaw-market-feed-snapshot.timer` 是接口失效且暂无可用备用接口时的临时兜底快照，不默认启用；当前运行态仍以主源优先和 operator diagnostics 为准，自动 failover / failback 属于待落地的设计目标。
 
 
 ## 可选模块：Agent collaboration v0
