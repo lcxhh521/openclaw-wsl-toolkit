@@ -73,6 +73,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\OpenC
 
 This runner normalizes line endings to LF, writes UTF-8 without BOM, copies the script through `\\wsl.localhost\<Distro>\tmp\codex_wsl_safe\`, and executes it inside the selected distro. Use it for repeatable maintenance or diagnostics instead of hand-assembling complex PowerShell/WSL one-liners. It is not a permission bypass: destructive commands, restarts, sends, or config writes still require the same user approval as the underlying operation.
 
+If `wsl --list --verbose` or `\\wsl.localhost\<Distro>` fails from Codex or a scheduled Windows automation but works from the user's own Windows session, treat it as a WSL visibility/context mismatch first. Prefer the bundled compatibility helpers before concluding that Ubuntu or OpenClaw is damaged:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\OpenClawWslTools\Invoke-StableWsl.ps1" -Health
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\OpenClawWslTools\Invoke-WslScript.ps1" -LocalScriptPath .\script.sh
+```
+
+`Invoke-StableWsl.ps1` resolves `C:\Windows\System32\wsl.exe` explicitly and writes bounded local diagnostics. `Invoke-WslScript.ps1` uses the UTF-8 stdin bridge instead of depending on `\\wsl.localhost` file copies. Runtime state such as `stable-wsl-state.json` is local-only and must not be committed.
+
 Run these baseline Windows checks first:
 
 ```powershell

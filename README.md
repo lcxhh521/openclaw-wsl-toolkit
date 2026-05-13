@@ -175,6 +175,19 @@ Use $openclaw-telegram-wsl-setup to follow the OpenClaw 养虾指南 on Windows 
 
 它适合 Codex/OpenClaw 维护、状态检查、仓库同步、只读诊断等场景；不保存 secrets，默认清理临时文件。因为仓库里的 PowerShell 脚本通常未签名，手动运行时建议先用 `Install-InvokeWslSafe.ps1` 安装到 `%LOCALAPPDATA%\OpenClawWslTools\`，再用 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ...` 只对本次调用放行；不要依赖直接从 `\\wsl.localhost` 执行 ps1。涉及删除、重启、真实发送或配置写入时，仍然需要按任务本身取得用户授权。
 
+### WSL 可见性兼容入口
+
+如果 Codex、计划任务或其它 Windows 自动化上下文里出现 `WSL_E_DISTRO_NOT_FOUND`、`wsl --list --verbose` 看不到 Ubuntu、或者 `\\wsl.localhost\<Distro>` 不存在，但用户自己的 Windows 会话里 Ubuntu 明明还在运行，就不要把它直接判定为 OpenClaw 或 Ubuntu 损坏。这通常是 Windows 用户上下文/沙盒上下文不一致导致的 WSL 可见性问题。
+
+同一工具目录还包含兼容入口：
+
+- `Invoke-StableWsl.ps1`：固定使用 `C:\Windows\System32\wsl.exe`，并写出本地诊断状态。
+- `WslUtf8Bridge.ps1`：通过 stdin 把 UTF-8 内容写入 WSL，避开 `\\wsl.localhost` 拷贝失败。
+- `Invoke-WslScript.ps1`：用上面的桥把本地脚本投递到 WSL 后执行。
+- `Start-WslKeepalive.ps1`：隐藏启动一个 WSL keepalive，减少冷启动/休眠后的抖动。
+
+这些脚本属于本机可靠性基础设施，不改变 OpenClaw 内容生成、模型、prompt 或发布逻辑。
+
 ## 本机 OpenClaw 控制中心
 
 仓库附带一个 Windows 原生控制中心：
