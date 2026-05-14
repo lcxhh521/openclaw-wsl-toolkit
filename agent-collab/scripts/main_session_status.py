@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_SESSIONS = Path(os.environ.get("OPENCLAW_MAIN_SESSIONS_FILE", "/home/lcxhh/.openclaw/agents/main/sessions/sessions.json"))
+DEFAULT_SESSIONS = Path(os.environ.get("OPENCLAW_MAIN_SESSIONS_FILE", str(Path.home() / ".openclaw" / "agents" / "main" / "sessions" / "sessions.json")))
 MAIN_TELEGRAM_KEY = os.environ.get("OPENCLAW_MAIN_SESSION_KEY", "")
 
 

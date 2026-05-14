@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
-WORKSPACE = Path("/home/lcxhh/.openclaw/workspace")
+WORKSPACE = Path(os.environ.get("OPENCLAW_WORKSPACE", str(Path.home() / ".openclaw" / "workspace")))
 MARKET_PHASES = ("morning", "midday", "close", "night")
 MARKET_LABELS = {
     "morning": "晨报",

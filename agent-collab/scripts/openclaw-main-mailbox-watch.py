@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(os.environ.get("OPENCLAW_AGENT_MAILBOX_DIR", "/home/lcxhh/.openclaw/workspace/codex-main-bridge"))
+ROOT = Path(os.environ.get("OPENCLAW_AGENT_MAILBOX_DIR", str(Path.home() / ".openclaw" / "workspace" / "codex-main-bridge")))
 TURN_FILE = ROOT / "turn.json"
 CODEX_FILE = ROOT / "codex_to_main.md"
 MAIN_FILE = ROOT / "main_to_codex.md"
@@ -16,7 +16,7 @@ STATE_FILE = ROOT / ".openclaw_main_watcher_state.json"
 LOCK_FILE = ROOT / ".openclaw_main_watcher.lock"
 LOG_FILE = ROOT / "openclaw-main-mailbox-watch.log"
 
-OPENCLAW = os.environ.get("OPENCLAW_BIN", "/home/lcxhh/.local/bin/openclaw")
+OPENCLAW = os.environ.get("OPENCLAW_BIN", str(Path.home() / ".local" / "bin" / "openclaw"))
 MAIN_SESSION_ID = os.environ.get("OPENCLAW_MAIN_SESSION_ID", "")
 RETRY_AFTER_SECONDS = 10 * 60
 MAX_TRIGGER_ATTEMPTS = 3
