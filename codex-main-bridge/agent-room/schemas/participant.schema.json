@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openclaw.agent_room.participant.v0",
+  "description": "Canonical participant state and routing policy.",
+  "type": "object",
+  "required": ["schema", "id", "status", "routing", "canonical_lane", "updated_at"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "const": "openclaw.agent_room.participant.v0" },
+    "id": { "type": "string" },
+    "display_name": { "type": ["string", "null"] },
+    "status": { "type": "string", "enum": ["active", "candidate", "blocked", "disabled"] },
+    "routing": {
+      "type": "object",
+      "required": ["enabled"],
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] },
+        "default_role": { "type": ["string", "null"] },
+        "priority": { "type": ["integer", "null"] }
+      }
+    },
+    "canonical_lane": { "type": ["string", "null"] },
+    "comment_lane_path": { "type": ["string", "null"] },
+    "result_adapter": { "type": ["string", "null"] },
+    "manual_boundary": { "type": "boolean" },
+    "artifact_expectations": { "type": "array", "items": { "type": "string" } },
+    "review_status": {
+      "type": "string",
+      "enum": [
+        "not_requested",
+        "requested",
+        "running",
+        "fallback_review",
+        "blocked_review",
+        "single_agent_review",
+        "dual_review_verified",
+        "accepted",
+        "rejected"
+      ]
+    },
+    "proactive_comment_policy": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "allowed_kinds": { "type": "array", "items": { "type": "string" } },
+        "requires_task_manifest_for_side_effects": { "type": "boolean" },
+        "canonical_import_allowed": { "type": "boolean" },
+        "telegram_projection_allowed": { "type": "boolean" },
+        "notes": { "type": "string" }
+      }
+    },
+    "last_error_class": { "type": ["string", "null"] },
+    "external_side_effect_gate": { "type": "object", "additionalProperties": true },
+    "capabilities": { "type": "object", "additionalProperties": true },
+    "last_seen_at": { "type": ["string", "null"] },
+    "last_task_id": { "type": ["string", "null"] },
+    "last_run_id": { "type": ["string", "null"] },
+    "last_result_kind": { "type": ["string", "null"] },
+    "blocked_reason": { "type": ["string", "null"] },
+    "updated_at": { "type": "string" }
+  }
+}

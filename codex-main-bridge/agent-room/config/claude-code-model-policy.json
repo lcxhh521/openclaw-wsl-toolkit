@@ -1,0 +1,109 @@
+{
+  "schema": "openclaw.agent_room.claude_code_model_policy.v0",
+  "scope": "Only for selecting the Ark model used when OpenClaw invokes the claude-code agent in Agent Room/runtime work.",
+  "default_model": "minimax-m2.7",
+  "fallback_model": "glm-5.1",
+  "latest_family_models": {
+    "deepseek": "deepseek-v4-pro",
+    "deepseek-flash": "deepseek-v4-flash",
+    "glm": "glm-5.1",
+    "kimi": "kimi-k2.6",
+    "minimax": "minimax-m2.7"
+  },
+  "retired_family_replacements": {
+    "glm-4.7": "glm-5.1",
+    "kimi-k2.5": "kimi-k2.6",
+    "minimax-m2.5": "minimax-m2.7",
+    "deepseek-v3.2": "deepseek-v4-pro"
+  },
+  "doubao_family": {
+    "allowed_tails": [],
+    "allowed_route_keys": [],
+    "policy": "All Doubao-family models are fully disabled for Claude Code as of 2026-05-22 per Alex directive. No exceptions."
+  },
+  "routes": {
+    "plain_chat": {
+      "candidates": [
+        "minimax-m2.7",
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "glm-5.1",
+        "kimi-k2.6"
+      ],
+      "reason": "ordinary Agent Room Claude Code discussion; avoid Kimi overuse; V4-flash for speed, V4-pro as deeper backup; DeepSeek v3.2 retired after 2026-05-25 V4 smoke"
+    },
+    "minimax_glm_pair": {
+      "candidates": [
+        "minimax-m2.7",
+        "glm-5.1"
+      ],
+      "reason": "user explicitly requested this turn to prioritize both minimax and glm in-chain"
+    },
+    "workspace_write": {
+      "candidates": [
+        "glm-5.1",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "minimax-m2.7",
+        "kimi-k2.6"
+      ],
+      "reason": "source-edit/runtime work; prefer GLM then DeepSeek V4-pro/V4-flash before MiniMax/Kimi; DeepSeek v3.2 retired after live V4 smoke"
+    },
+    "peer_review": {
+      "candidates": [
+        "minimax-m2.7",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "glm-5.1",
+        "kimi-k2.6"
+      ],
+      "reason": "peer review / challenge / second opinion; prefer MiniMax then DeepSeek V4; DeepSeek v3.2 retired after live V4 smoke"
+    },
+    "long_context": {
+      "candidates": [
+        "kimi-k2.6",
+        "deepseek-v4-pro",
+        "glm-5.1",
+        "minimax-m2.7"
+      ],
+      "reason": "long-context synthesis is the main place where Kimi remains first choice; DeepSeek V4-pro as second; DeepSeek v3.2 retired after live V4 smoke"
+    },
+    "deep_reasoning": {
+      "candidates": [
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "glm-5.1",
+        "minimax-m2.7",
+        "kimi-k2.6"
+      ],
+      "reason": "explicit deep reasoning / complex logic; DeepSeek V4-pro first and V4-flash second after 2026-05-25 Ark Coding Plan live smoke; deepseek-reasoner is excluded because Ark Coding Plan returned UnsupportedModel"
+    },
+    "low_stakes_formatting": {
+      "candidates": [
+        "deepseek-v4-flash",
+        "minimax-m2.7",
+        "glm-5.1"
+      ],
+      "reason": "least-important formatting/low-risk cleanup only; V4-flash first for speed and cost; Doubao removed 2026-05-22; DeepSeek v3.2 retired after live V4 smoke"
+    }
+  },
+  "last_live_smoke": {
+    "checked_at": "2026-05-25T20:18:08+08:00",
+    "models": [
+      "deepseek-v4-flash",
+      "deepseek-v4-pro"
+    ],
+    "result": "both_completed_exit_0_parsed_json_no_tool_calls",
+    "artifact_root": "codex-main-bridge/agent-room/artifacts/model-smoke/"
+  },
+  "last_direct_provider_smoke": {
+    "checked_at": "2026-05-25T21:18:55+08:00",
+    "models": [
+      "deepseek-v4-pro",
+      "deepseek-v4-flash",
+      "deepseek-reasoner"
+    ],
+    "result": "deepseek-v4-pro and deepseek-v4-flash succeeded through Ark Coding Plan; deepseek-reasoner returned UnsupportedModel; later minimal retry hit AccountQuotaExceeded until 2026-05-25T23:08:24+08:00",
+    "artifact_root": "codex-main-bridge/agent-room/artifacts/ark-reasoning-candidate-v4-live-20260525-2112/"
+  }
+}

@@ -207,6 +207,7 @@ namespace OpenClawLocalMonitor
         public string LocalWorkAge = "-";
         public readonly List<string[]> Tasks = new List<string[]>();
         public readonly List<string> Sessions = new List<string>();
+        public string CollabStatus = "";
         public readonly List<string> Logs = new List<string>();
         public readonly List<string> TokenFlows = new List<string>();
     }
@@ -313,7 +314,7 @@ namespace OpenClawLocalMonitor
     sealed class MonitorForm : Form
     {
         const string WslDistro = "Ubuntu";
-        const string OpenClawCommand = "openclaw";
+        const string OpenClawAbsolutePath = "/home/lcxhh/.local/bin/openclaw";
         static readonly bool MainPanelAutoRefreshEnabled = false;
         const int AutoRefreshIntervalMs = 120000;
         readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 100 };
@@ -368,6 +369,7 @@ namespace OpenClawLocalMonitor
         DataGridView taskGrid;
         ListBox sessionList;
         ListBox logList;
+        Label collabStatusLabel;
         Button openControlButton;
         NotifyIcon trayIcon;
         ContextMenuStrip trayMenu;
@@ -893,6 +895,8 @@ namespace OpenClawLocalMonitor
             Controls.Add(statusLine);
             legendLine = MakeLabel("绿色=就绪，蓝色=正在工作，黄色=需要留意，红色=需要处理。", 28, 874, 1154, 22, 8.5f, Color.FromArgb(148, 163, 184), false);
             Controls.Add(legendLine);
+            collabStatusLabel = MakeLabel("", 28, 662, 1154, 20, 9f, Color.FromArgb(100, 116, 139), false);
+            Controls.Add(collabStatusLabel);
             BuildHoverTip();
             LayoutUi();
         }
@@ -1069,6 +1073,9 @@ namespace OpenClawLocalMonitor
                 taskGrid.Visible = false;
                 if (taskHeader != null) taskHeader.Visible = false;
                 y += 8;
+
+                collabStatusLabel.SetBounds(margin, y, contentWidth, 20);
+                y += 26;
 
                 var halfWidth = (contentWidth - gap) / 2;
                 MoveDirectLabelFromOriginalY(692, margin, y, halfWidth, 24);
@@ -1483,8 +1490,24 @@ namespace OpenClawLocalMonitor
                     var configured = ToBool(Get(source, "configured"));
                     var running = ToBool(Get(source, "running"));
                     var connected = ToBool(Get(source, "connected"));
+                    var lastInboundAt = ToLong(Get(source, "lastInboundAt"));
+                    var lastOutboundAt = ToLong(Get(source, "lastOutboundAt"));
+                    var inboundSeen = lastInboundAt > 0;
+                    var outboundSeen = lastOutboundAt > 0;
                     var ok = configured && running && connected;
-                    d.Telegram.Add(new DiagnosticItem("Channel", ok ? "已连接" : "需检查", ok ? "Good" : "Risk", "configured=" + configured + ", running=" + running + ", connected=" + connected, "channels status --json"));
+                    var channelValue = !configured ? "未配置" : !running ? "未运行" : !connected ? "未连接" : outboundSeen ? "已回复" : inboundSeen ? "已收未回证" : "已连接未验证";
+                    var channelState = ok ? (outboundSeen ? "Good" : "Warn") : "Risk";
+                    d.Telegram.Add(new DiagnosticItem("Channel", channelValue, channelState, "configured=" + configured + ", running=" + running + ", connected=" + connected + ", inboundSeen=" + inboundSeen + ", outboundSeen=" + outboundSeen, "channels status --json"));
+
+                    var eventLoop = AsDict(Get(data, "eventLoop"));
+                    if (eventLoop.Count > 0)
+                    {
+                        var degraded = ToBool(Get(eventLoop, "degraded"));
+                        var reasons = string.Join(",", AsList(Get(eventLoop, "reasons")).Cast<object>().Select(x => Convert.ToString(x)));
+                        var utilization = Convert.ToString(Get(eventLoop, "utilization") ?? "-");
+                        var cpuCoreRatio = Convert.ToString(Get(eventLoop, "cpuCoreRatio") ?? "-");
+                        d.Telegram.Add(new DiagnosticItem("Entrance pressure", degraded ? "在线但可能慢" : "正常", degraded ? "Warn" : "Good", "eventLoop.degraded=" + degraded + ", reasons=" + reasons + ", utilization=" + utilization + ", cpuCoreRatio=" + cpuCoreRatio, "channels status --json eventLoop"));
+                    }
                 }
                 else
                 {
@@ -2053,20 +2076,20 @@ namespace OpenClawLocalMonitor
 
         CommandResult StartOpenClawGateway()
         {
-            var script =
+            var script = OpenClawBootstrapScript() +
                 "systemctl --user start openclaw-gateway.service >/dev/null 2>&1 || true\n" +
                 "pgrep -af 'openclaw-manual-keepalive' >/dev/null 2>&1 || (nohup bash -lc 'exec -a openclaw-manual-keepalive sleep infinity' >/dev/null 2>&1 &)\n" +
-                "for i in $(seq 1 45); do openclaw gateway probe >/dev/null 2>&1 && exit 0; sleep 1; done\n" +
+                "for i in $(seq 1 45); do \"$OPENCLAW_BIN\" gateway probe >/dev/null 2>&1 && exit 0; sleep 1; done\n" +
                 "exit 1";
             return RunProcess("wsl.exe", new[] { "-d", WslDistro, "--", "bash", "-lc", script }, 60000);
         }
 
         CommandResult StopOpenClawGateway()
         {
-            var script =
+            var script = OpenClawBootstrapScript() +
                 "systemctl --user stop openclaw-gateway.service >/dev/null 2>&1 || true\n" +
                 "pkill -f '[o]penclaw-manual-keepalive' >/dev/null 2>&1 || true\n" +
-                "for i in $(seq 1 20); do openclaw gateway probe >/dev/null 2>&1 || exit 0; sleep 1; done\n" +
+                "for i in $(seq 1 20); do \"$OPENCLAW_BIN\" gateway probe >/dev/null 2>&1 || exit 0; sleep 1; done\n" +
                 "exit 1";
             return RunProcess("wsl.exe", new[] { "-d", WslDistro, "--", "bash", "-lc", script }, 30000);
         }
@@ -2234,6 +2257,7 @@ namespace OpenClawLocalMonitor
             FillLocalGatewayFacts(snapshot);
             FillTaskRecordsSnapshot(snapshot);
             FillAgentEvidenceSnapshot(snapshot);
+            snapshot.CollabStatus = ReadAgentRoomCollabStatus();
             FinalizeMainPanelConnectivityState(snapshot);
             FillUsageCacheSnapshot(snapshot);
             FillReliabilitySnapshot(snapshot);
@@ -2601,6 +2625,21 @@ namespace OpenClawLocalMonitor
             }
         }
 
+        string ReadAgentRoomCollabStatus()
+        {
+            var result = RunProcess("wsl.exe", new[] {
+                "-d", WslDistro, "--", "bash", "-lc",
+                "cat ~/.openclaw/workspace/codex-main-bridge/agent-room/collaboration-status/compact.txt 2>/dev/null || echo ''"
+            }, 4000);
+            if (result.Ok && !string.IsNullOrWhiteSpace(result.Stdout))
+            {
+                var lines = result.Stdout.Trim().Split('\n');
+                var firstTwo = lines.Take(2).Select(l => l.Trim()).ToList();
+                return string.Join(" | ", firstTwo);
+            }
+            return "";
+        }
+
         string AgentModelLabel(object modelObj)
         {
             var model = AsDict(modelObj);
@@ -2829,6 +2868,8 @@ namespace OpenClawLocalMonitor
             s.TelegramLastStartAt = ToLong(Get(source, "lastStartAt"));
             s.TelegramLastInboundAt = ToLong(Get(source, "lastInboundAt"));
             s.TelegramLastOutboundAt = ToLong(Get(source, "lastOutboundAt"));
+            var eventLoop = AsDict(Get(data, "eventLoop"));
+            var eventLoopDegraded = ToBool(Get(eventLoop, "degraded"));
 
             var startAgeMs = MillisecondsSince(s.TelegramLastStartAt);
             var startupWindow = startAgeMs <= 120000;
@@ -2862,9 +2903,11 @@ namespace OpenClawLocalMonitor
                 return;
             }
 
+            var inboundSeen = s.TelegramLastInboundAt > 0 && (s.TelegramLastStartAt <= 0 || s.TelegramLastInboundAt >= s.TelegramLastStartAt);
+            var outboundSeen = s.TelegramLastOutboundAt > 0 && (s.TelegramLastStartAt <= 0 || s.TelegramLastOutboundAt >= s.TelegramLastStartAt);
             s.TelegramOk = true;
-            s.TelegramText = "已连接";
-            s.TelegramCardState = "good";
+            s.TelegramText = outboundSeen ? "已回复" : inboundSeen ? "已收未回证" : "已连接未验证";
+            s.TelegramCardState = outboundSeen && !eventLoopDegraded ? "good" : "warn";
 
             if (startupWindow)
             {
@@ -2876,8 +2919,14 @@ namespace OpenClawLocalMonitor
                 return;
             }
 
-            var verified = s.TelegramLastOutboundAt > 0 && (s.TelegramLastStartAt <= 0 || s.TelegramLastOutboundAt >= s.TelegramLastStartAt);
-            SetStartupProgress(s, 100, verified ? "回复链路已验证" : "已就绪", verified ? "本次启动后已有 Telegram 回复记录。" : "gateway 和 Telegram 已稳定，冷启动窗口已结束。");
+            SetStartupProgress(s, 100, outboundSeen ? "回复链路已验证" : inboundSeen ? "已收到入站" : "连接已就绪", outboundSeen ? "本次启动后已有 Telegram 回复记录。" : inboundSeen ? "本次启动后已收到 Telegram 入站；尚未看到本地 outbound 记录。" : "gateway 和 Telegram 已稳定，冷启动窗口已结束；尚未看到本地入站/回复记录。");
+            if (eventLoopDegraded)
+            {
+                var reasons = string.Join(",", AsList(Get(eventLoop, "reasons")).Cast<object>().Select(x => Convert.ToString(x)));
+                s.StatusLine = string.IsNullOrWhiteSpace(s.StatusLine)
+                    ? "Telegram 在线但入口压力偏高：" + reasons
+                    : s.StatusLine + " | 入口压力偏高：" + reasons;
+            }
         }
 
         void FillTasks(Snapshot s, object tasksObj)
@@ -3778,9 +3827,16 @@ namespace OpenClawLocalMonitor
 
         string BashCommand(string[] args)
         {
-            var parts = new List<string> { OpenClawCommand };
+            var parts = new List<string> { "\"$OPENCLAW_BIN\"" };
             parts.AddRange(args.Select(ShellQuote));
-            return string.Join(" ", parts);
+            return OpenClawBootstrapScript() + string.Join(" ", parts);
+        }
+
+        string OpenClawBootstrapScript()
+        {
+            return "OPENCLAW_BIN=" + ShellQuote(OpenClawAbsolutePath) + "\n" +
+                "[ -x \"$OPENCLAW_BIN\" ] || OPENCLAW_BIN=$(command -v openclaw 2>/dev/null || true)\n" +
+                "[ -n \"$OPENCLAW_BIN\" ] || exit 127\n";
         }
 
         string ShellQuote(string arg)
@@ -3886,6 +3942,8 @@ namespace OpenClawLocalMonitor
 
             logList.Items.Clear();
             foreach (var row in s.Logs) logList.Items.Add(row);
+
+            collabStatusLabel.Text = string.IsNullOrWhiteSpace(s.CollabStatus) ? "" : "🤖 协作状态: " + s.CollabStatus.Replace("\n", " | ");
 
             statusLine.Text = s.StatusLine;
         }

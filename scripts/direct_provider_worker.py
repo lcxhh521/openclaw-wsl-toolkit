@@ -22,7 +22,25 @@ from pathlib import Path
 from typing import Any
 
 WORKSPACE = Path(os.environ.get("OPENCLAW_WORKSPACE", str(Path.home() / ".openclaw" / "workspace")))
+ROOT = Path(os.environ.get("OPENCLAW_ROOM_ROOT", str(WORKSPACE / "codex-main-bridge")))
+QUOTA_LEDGER_TOOL = ROOT / "agent-room" / "tools" / "quota_ledger.py"
+if QUOTA_LEDGER_TOOL.exists():
+    sys.path.insert(0, str(QUOTA_LEDGER_TOOL.parent))
+    try:
+        from quota_ledger import update_quota_ledger_from_headers, update_quota_ledger_from_usage
+    except Exception:
+        update_quota_ledger_from_headers = None
+        update_quota_ledger_from_usage = None
+else:
+    update_quota_ledger_from_headers = None
+    update_quota_ledger_from_usage = None
 DEFAULT_OUTPUT_ROOT = WORKSPACE / "worker-runs"
+SECRET_FILES = [
+    Path.home() / ".openclaw" / "secrets" / "agent-room-deepseek.env",
+    Path.home() / ".openclaw" / "secrets" / "agent-room-openai.env",
+    Path.home() / ".openclaw" / "secrets" / "volcengine.env",
+    Path.home() / ".openclaw" / ".env",
+]
 
 
 @dataclass(frozen=True)
@@ -90,14 +108,47 @@ def resolve_profile(args: argparse.Namespace) -> ProviderProfile:
     if args.profile not in PROFILES:
         raise WorkerError("unknown_provider_profile", f"Unknown provider profile: {args.profile}")
     profile = PROFILES[args.profile]
-    base_url = (args.base_url or profile.base_url or "").rstrip("/")
-    api_key_env = args.api_key_env or profile.api_key_env
-    model = args.model or profile.default_model
+    if profile.name == "openai-compatible":
+        base_url = (args.base_url or profile.base_url or _resolve_secret_config("OPENCLAW_WORKER_BASE_URL") or "").rstrip("/")
+        api_key_env = args.api_key_env or _resolve_secret_config("OPENCLAW_WORKER_API_KEY_ENV") or profile.api_key_env
+        model = args.model or profile.default_model or _resolve_secret_config("OPENCLAW_WORKER_MODEL")
+    else:
+        base_url = (args.base_url or profile.base_url or "").rstrip("/")
+        api_key_env = args.api_key_env or profile.api_key_env
+        model = args.model or profile.default_model
     if not base_url:
         raise WorkerError("missing_base_url", "Provider base URL is not configured")
     if not model:
         raise WorkerError("missing_model", "Provider model is not configured")
     return ProviderProfile(profile.name, base_url, api_key_env, model, profile.endpoint_path)
+
+
+def _resolve_secret_config(env_name: str) -> str:
+    """Resolve non-secret provider metadata from local secret env files.
+
+    The external DeepSeek fallback is intentionally installed outside the repo
+    in ~/.openclaw/secrets/agent-room-deepseek.env. Loading base URL/model/env
+    metadata from that file lets operators paste only the key once and then run
+    the generic openai-compatible worker without manually exporting variables.
+    """
+    value = os.environ.get(env_name)
+    if value:
+        return value
+    for path in SECRET_FILES:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            continue
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            key, val = line.split("=", 1)
+            if key.strip() == env_name:
+                return val.strip().strip('"').strip("'")
+    return ""
 
 
 def redact_error_detail(detail: Any) -> Any:
@@ -117,6 +168,32 @@ def redact_error_detail(detail: Any) -> Any:
     return detail
 
 
+def _resolve_api_key(env_name: str) -> str:
+    """Resolve API key from env var, falling back to secret files.
+
+    Mirrors the key-resolution logic in
+    modules/openclaw-volcengine-coding-plan/scripts/check_memory_enhancement.py
+    so that the worker works when the key is in
+    ~/.openclaw/secrets/volcengine.env but not in the process environment.
+    """
+    value = os.environ.get(env_name)
+    if value:
+        return value
+    for path in SECRET_FILES:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            continue
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            if key.strip() == env_name:
+                return val.strip().strip('"').strip("'")
+    return ""
+
+
 def call_chat_completions(
     profile: ProviderProfile,
     prompt: str,
@@ -125,17 +202,19 @@ def call_chat_completions(
     max_tokens: int,
     temperature: float,
     timeout: int,
+    extra_body: dict[str, Any] | None = None,
+    quota_agent_id: str | None = None,
 ) -> tuple[dict[str, Any], float]:
-    api_key = os.environ.get(profile.api_key_env)
+    api_key = _resolve_api_key(profile.api_key_env)
     if not api_key:
-        raise WorkerError("missing_api_key", f"Missing provider API key env: {profile.api_key_env}")
+        raise WorkerError("missing_api_key", f"Missing provider API key env: {profile.api_key_env} (checked env var and secret files)")
 
     messages: list[dict[str, str]] = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    body = {
+    body: dict[str, Any] = {
         "model": profile.default_model,
         "messages": messages,
         "temperature": temperature,
@@ -143,6 +222,8 @@ def call_chat_completions(
     }
     if max_tokens and max_tokens > 0:
         body["max_tokens"] = max_tokens
+    if extra_body:
+        body.update(extra_body)
     request = urllib.request.Request(
         profile.base_url + profile.endpoint_path,
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -156,9 +237,29 @@ def call_chat_completions(
             data = json.loads(raw)
             elapsed = time.time() - start
             data.setdefault("_worker", {})
-            data["_worker"].update({"ok": True, "elapsed_sec": round(elapsed, 3), "http_status": response.status})
+            # Capture HTTP response headers for quota/rate-limit tracking
+            response_headers = {}
+            if hasattr(response, "headers") and response.headers:
+                for header_key in response.headers:
+                    response_headers[header_key.lower()] = response.headers[header_key]
+            elif hasattr(response, "info"):
+                info = response.info()
+                if hasattr(info, "items"):
+                    for k, v in info.items():
+                        response_headers[k.lower()] = v
+            data["_worker"].update({
+                "ok": True,
+                "elapsed_sec": round(elapsed, 3),
+                "http_status": response.status,
+                "response_headers": response_headers,
+            })
             return data, elapsed
     except urllib.error.HTTPError as exc:
+        if update_quota_ledger_from_headers is not None and exc.headers:
+            try:
+                update_quota_ledger_from_headers(profile.default_model, exc.headers, agent_id=quota_agent_id)
+            except Exception:
+                pass
         raw = exc.read().decode("utf-8", "replace")
         try:
             detail: Any = json.loads(raw)
@@ -238,7 +339,23 @@ def run(args: argparse.Namespace) -> int:
             max_tokens=args.max_tokens,
             temperature=args.temperature,
             timeout=args.timeout,
+            quota_agent_id=getattr(args, "agent_id", "direct-provider"),
         )
+        # Wire quota headers to quota_ledger for remaining-quota visibility
+        if update_quota_ledger_from_headers is not None:
+            worker_data = response.get("_worker", {})
+            headers = worker_data.get("response_headers") or worker_data.get("headers") or {}
+            if headers:
+                try:
+                    update_quota_ledger_from_headers(profile.default_model, headers, agent_id=getattr(args, "agent_id", "direct-provider"))
+                except Exception:
+                    pass  # Non-fatal: quota tracking must not break worker execution
+        if update_quota_ledger_from_usage is not None:
+            try:
+                update_quota_ledger_from_usage(profile.default_model, response.get("usage") or {})
+            except Exception:
+                pass  # Non-fatal: quota tracking must not break worker execution
+
         result_text = extract_text(response)
         (output_dir / "result.md").write_text(result_text + ("\n" if result_text else ""), encoding="utf-8")
         write_json(output_dir / "response.json", response)
@@ -279,6 +396,7 @@ def main() -> int:
     parser.add_argument("--model", help="Model id; defaults to profile/env model")
     parser.add_argument("--task-id")
     parser.add_argument("--task-type", default="generic_worker")
+    parser.add_argument("--agent-id", default="direct-provider", help="Agent id used when projecting quota headers into model_quota_signal.json")
     parser.add_argument("--contract-file")
     parser.add_argument("--input-file")
     parser.add_argument("--output-dir")

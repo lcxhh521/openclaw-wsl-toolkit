@@ -71,6 +71,10 @@ The old manual recheck path has been removed from the main panel. Use `诊断` f
 
 During OpenClaw cold startup, the panel uses a lightweight startup probe first: gateway probe plus Telegram channel status. It skips heavier task, audit, log, token, cost, session, and workspace-artifact reads until the startup progress reaches ready. This keeps the control center from adding pressure while OpenClaw is still bringing up channels and sidecars.
 
+Startup and control actions must not depend on a login-shell `PATH`. The monitor and `Start-OpenClaw.ps1` should prefer `/home/lcxhh/.local/bin/openclaw`, falling back to `command -v openclaw` only when that absolute path is unavailable. This prevents non-login WSL launch contexts from reporting `openclaw: command not found` while the gateway is otherwise healthy.
+
+Telegram status is intentionally split: gateway reachable, Telegram configured/running/connected, inbound seen, outbound/reply completed, and entrance pressure/event-loop degraded are separate signals. Do not collapse them into a single “Telegram 正常” label; “connected” only proves transport state, not that Alex has received a fresh reply.
+
 When restoring from the system tray or the Windows taskbar, the window should force layout and repaint before becoming visible. Avoid `WS_EX_COMPOSITED` full-window compositing for this panel because it can make child controls briefly appear as black or unpainted rectangles during startup or restore.
 
 ## Diagnostics v0

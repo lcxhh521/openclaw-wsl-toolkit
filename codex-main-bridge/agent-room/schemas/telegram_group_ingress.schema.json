@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openclaw.agent_room.telegram_group_ingress.v0",
+  "description": "Telegram group event that creates or updates an Agent Room binding.",
+  "type": "object",
+  "required": [
+    "schema",
+    "event_id",
+    "event_type",
+    "chat_id",
+    "created_at",
+    "room_binding_action",
+    "canonical_state_advanced"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {
+      "const": "openclaw.agent_room.telegram_group_ingress.v0"
+    },
+    "event_id": {
+      "type": "string"
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "group_created",
+        "bot_invited",
+        "agent_mentioned",
+        "explicit_room_command",
+        "room_command",
+        "room_broadcast",
+        "room_message_ignored",
+        "bot_to_bot_trigger",
+        "agent_originated_mentions",
+        "agent_originated_room_message",
+        "member_removed"
+      ]
+    },
+    "chat_id": {
+      "type": "string"
+    },
+    "chat_title": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "telegram_message_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "actor_user_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "agent_candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "bot_username": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "adapter_verified": {
+            "type": "boolean"
+          },
+          "routing_ready": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "room_binding_action": {
+      "type": "string",
+      "enum": [
+        "create_room",
+        "update_room",
+        "ignore",
+        "blocked",
+        "add_participant",
+        "remove_participant",
+        "update_participants",
+        "create_task",
+        "record_only"
+      ]
+    },
+    "room_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "room_root": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "idempotency_key": {
+      "type": "string"
+    },
+    "canonical_state_advanced": {
+      "type": "boolean"
+    },
+    "side_effect_gate_status": {
+      "type": "string",
+      "enum": [
+        "closed",
+        "pending",
+        "open",
+        "used",
+        "failed"
+      ]
+    },
+    "telegram_projection_status": {
+      "type": "string",
+      "enum": [
+        "not_projected",
+        "pending",
+        "projected",
+        "suppressed",
+        "failed"
+      ]
+    },
+    "blocked_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "existing_room_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "created_new_room": {
+      "type": "boolean"
+    },
+    "participant_delta": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "added": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "removed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blocked": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

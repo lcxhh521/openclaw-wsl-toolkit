@@ -9,7 +9,10 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import random
 import subprocess
+import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -20,6 +23,281 @@ from gateway_model_lane import run_openclaw_model_call as run_native_openclaw_mo
 WORKSPACE = Path(os.environ.get("OPENCLAW_WORKSPACE", str(Path.home() / ".openclaw" / "workspace")))
 PROMPT_TRANSPORT_DIR = WORKSPACE / "model-inputs" / "native-prompt-transport"
 PROMPT_TRANSPORT_THRESHOLD = int(os.environ.get("OPENCLAW_NATIVE_PROMPT_FILE_THRESHOLD_CHARS") or "60000")
+NATIVE_BUSY_MAX_ATTEMPTS = int(os.environ.get("OPENCLAW_NATIVE_MODEL_CALL_BUSY_MAX_ATTEMPTS") or "5")
+NATIVE_BUSY_BACKOFF_SECONDS = float(os.environ.get("OPENCLAW_NATIVE_MODEL_CALL_BUSY_BACKOFF_SECONDS") or "2")
+NATIVE_BUSY_BACKOFF_MAX_SECONDS = float(os.environ.get("OPENCLAW_NATIVE_MODEL_CALL_BUSY_BACKOFF_MAX_SECONDS") or "30")
+FORMAL_FALLBACK_ENV = "OPENCLAW_ALLOW_FORMAL_OPENAI_COMPAT_FALLBACK"
+FORMAL_FALLBACK_MODEL_ENV = "OPENCLAW_FORMAL_OPENAI_COMPAT_FALLBACK_MODEL"
+FORMAL_FALLBACK_MODELS_ENV = "OPENCLAW_FORMAL_OPENAI_COMPAT_FALLBACK_MODELS"
+FORMAL_FALLBACK_MAX_TOKENS_ENV = "OPENCLAW_FORMAL_OPENAI_COMPAT_FALLBACK_MAX_TOKENS"
+FORMAL_FALLBACK_MARKER = "[FALLBACK]"
+
+
+def _formal_fallback_max_tokens() -> int:
+    raw = os.environ.get(FORMAL_FALLBACK_MAX_TOKENS_ENV, "8192")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 8192
+    return 8192 if value <= 0 else value
+
+
+def _formal_fallback_enabled() -> bool:
+    return os.environ.get(FORMAL_FALLBACK_ENV) == "1"
+
+
+def _formal_fallback_model_candidates() -> list[str]:
+    def pro_tier(candidate: str) -> str:
+        value = candidate.strip()
+        normalized = value.lower()
+        if normalized == "deepseek-v3.2":
+            return "deepseek-v4-pro"
+        if normalized.startswith("deepseek-") and normalized.endswith("-pro"):
+            return value
+        return ""
+
+    def unique_pro_tier(candidates: list[str]) -> list[str]:
+        models: list[str] = []
+        for candidate in candidates:
+            model = pro_tier(candidate)
+            if model and model not in models:
+                models.append(model)
+        return models
+
+    env_models = os.environ.get(FORMAL_FALLBACK_MODELS_ENV)
+    if env_models:
+        models = unique_pro_tier([item for item in env_models.split(",") if item.strip()])
+        if models:
+            return models
+    single = os.environ.get(FORMAL_FALLBACK_MODEL_ENV, "").strip()
+    if single:
+        models = unique_pro_tier([single])
+        if models:
+            return models
+    return ["deepseek-v4-pro"]
+
+
+def _is_quota_failure(completed: subprocess.CompletedProcess[str]) -> bool:
+    if completed.returncode == 0:
+        return False
+    if completed.returncode == 75:
+        return False
+    text = "\n".join(str(part or "") for part in [completed.stderr, completed.stdout]).lower()
+    markers = (
+        "usage_limit",
+        "usage limit",
+        "skipped_cooldown",
+        "cooldown_until",
+        "all ark cooldown",
+        "all_ark_cooldown",
+        "all candidate models have already emitted depletion notice",
+        "accountquotaexceeded",
+        "account quota",
+        "quota exceeded",
+        "too many requests",
+        "429",
+        "rate limit",
+        "insufficient_quota",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _is_formal_usage_limit_cooldown_failure(completed: subprocess.CompletedProcess[str]) -> bool:
+    if completed.returncode == 0:
+        return False
+    if completed.returncode == 75:
+        return False
+    text = "\n".join(str(part or "") for part in [completed.stderr, completed.stdout]).lower()
+    cooldown_markers = (
+        "skipped_cooldown",
+        "cooldown_until",
+        "all ark cooldown",
+        "all_ark_cooldown",
+        "all candidate models have already emitted depletion notice",
+    )
+    usage_limit_markers = (
+        "usage_limit",
+        "usage limit",
+        "accountquotaexceeded",
+        "account quota",
+        "quota exceeded",
+        "insufficient_quota",
+        "depletion notice",
+    )
+    return any(marker in text for marker in cooldown_markers) and any(
+        marker in text for marker in usage_limit_markers
+    )
+
+
+def _is_native_formal_transport_failure(completed: subprocess.CompletedProcess[str]) -> bool:
+    if completed.returncode == 0:
+        return False
+    text = "\n".join(str(part or "") for part in [completed.stderr, completed.stdout]).lower()
+    markers = (
+        "codex agent harness failed",
+        "not falling back to embedded pi backend",
+        "creatediagnostictracecontextfromactivescope",
+        "[diagnostic] lane task error",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _formal_fallback_reason(completed: subprocess.CompletedProcess[str]) -> str:
+    text = "\n".join(str(part or "") for part in [completed.stderr, completed.stdout]).lower()
+    transport_markers = (
+        "codex agent harness failed",
+        "not falling back to embedded pi backend",
+        "creatediagnostictracecontextfromactivescope",
+        "[diagnostic] lane task error",
+    )
+    if any(marker in text for marker in transport_markers):
+        return "native_formal_transport_failure"
+    cooldown_markers = (
+        "skipped_cooldown",
+        "cooldown_until",
+        "all ark cooldown",
+        "all_ark_cooldown",
+        "all candidate models have already emitted depletion notice",
+    )
+    if any(marker in text for marker in cooldown_markers):
+        return "all_ark_cooldown"
+    return "quota_or_rate_limit"
+
+
+def _fallback_marker(
+    model: str,
+    session_id: str,
+    output_dir: Path,
+    requested_model: str = "",
+    finish_reason: str = "",
+    truncated: bool = False,
+    fallback_reason: str = "",
+) -> str:
+    requested = f" requested={requested_model}" if requested_model else ""
+    extras: list[str] = []
+    if fallback_reason:
+        extras.append(f"reason={fallback_reason}")
+    if finish_reason:
+        extras.append(f"finish_reason={finish_reason}")
+    if truncated:
+        extras.append("truncated=1")
+    extra_suffix = f" {' '.join(extras)}" if extras else ""
+    return (
+        f"{FORMAL_FALLBACK_MARKER} ark->openai-compatible model={model} "
+        f"session={session_id} output_dir={output_dir}{requested}{extra_suffix}"
+    )
+
+
+def _extract_finish_reason(response: dict[str, Any]) -> str:
+    choices = response.get("choices") or []
+    if not choices:
+        return ""
+    first = choices[0]
+    if not isinstance(first, dict):
+        return ""
+    reason = first.get("finish_reason")
+    if isinstance(reason, str):
+        return reason.strip()
+    return ""
+
+
+def _is_incomplete_finish_reason(reason: str) -> bool:
+    if not reason:
+        return False
+    return reason.lower() not in {"stop", "tool_calls", "function_call"}
+
+
+def _is_formal_command_for_fallback(cmd: list[str]) -> bool:
+    if not is_formal_gpt_required_command(cmd):
+        return False
+    return True
+
+
+def _extract_prompt(cmd: list[str]) -> str:
+    return _option(cmd, "--message")
+
+
+def _normalize_task_id(value: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in value or "")
+    return safe[:96] or "formal-fallback"
+
+
+def _run_openai_compatible_fallback(
+    *,
+    cmd: list[str],
+    timeout: int,
+    prompt: str,
+    session_id: str,
+    fallback_reason: str,
+) -> subprocess.CompletedProcess[str] | None:
+    prompt = prompt or ""
+    if not prompt:
+        return None
+    candidate_models = _formal_fallback_model_candidates()
+    if not candidate_models:
+        return None
+    models_seen: list[str] = []
+    for index, fallback_model in enumerate(candidate_models):
+        if fallback_model in models_seen:
+            continue
+        models_seen.append(fallback_model)
+        try:
+            result = run_direct_provider_text_prompt(
+                prompt=prompt,
+                task_id=f"{session_id}-formal-fallback",
+                task_type=f"formal_fallback_{_normalize_task_id(session_id)}",
+                model=fallback_model,
+                provider_profile="openai-compatible",
+                timeout=max(30, int(timeout)),
+                max_tokens=_formal_fallback_max_tokens(),
+                output_dir=None,
+                agent_id=f"formal-fallback-{_normalize_task_id(session_id)}",
+            )
+            response = result.get("response") or {}
+            finish_reason = _extract_finish_reason(response)
+            truncated = _is_incomplete_finish_reason(finish_reason)
+            fallback_text = result.get("text") or ""
+            if truncated:
+                fallback_text = f"{fallback_text}\n\n[truncated]" if fallback_text else "[truncated]"
+            manifest = result.get("manifest") or {}
+            stdout_payload: dict[str, Any] = {
+                "payloads": [{"text": fallback_text}],
+                "meta": {
+                    "agentMeta": {
+                        "usage": response.get("usage"),
+                        "provider": "openai-compatible",
+                        "directProvider": manifest,
+                        "executionTrace": {
+                            "fallbackUsed": True,
+                            "fallbackReason": fallback_reason,
+                            "fallbackProfile": "openai-compatible",
+                            "fallbackModel": fallback_model,
+                            "fallbackRequestedModel": _option(cmd, "--model"),
+                            "fallbackFinishReason": finish_reason,
+                            "fallbackTruncated": truncated,
+                        },
+                        "winnerModel": fallback_model,
+                    }
+                },
+            }
+            marker = _fallback_marker(
+                fallback_model,
+                session_id,
+                WORKSPACE / "worker-runs" / "formal-openai-compatible-fallback" / f"{session_id}",
+                _option(cmd, "--model"),
+                finish_reason=finish_reason,
+                truncated=truncated,
+                fallback_reason=fallback_reason,
+            )
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                json.dumps(stdout_payload, ensure_ascii=False),
+                marker,
+            )
+        except DirectProviderError:
+            continue
+    return None
 
 
 def _option(cmd: list[str], name: str, default: str = "") -> str:
@@ -136,6 +414,7 @@ def completed_from_direct_provider(cmd: list[str], *, timeout: int) -> subproces
             timeout=max(30, int(timeout)),
             max_tokens=8192,
             output_dir=None,
+            agent_id=agent,
         )
         response = result.get("response") or {}
         manifest = result.get("manifest") or {}
@@ -159,6 +438,41 @@ def completed_from_direct_provider(cmd: list[str], *, timeout: int) -> subproces
         return subprocess.CompletedProcess(cmd, 75, "", json.dumps(error, ensure_ascii=False))
 
 
+def is_retryable_native_lane_busy(completed: subprocess.CompletedProcess[str]) -> bool:
+    if completed.returncode != 75:
+        return False
+    stderr = str(completed.stderr or "").lower()
+    return "gateway_model_lane" in stderr or "lane_not_acquired" in stderr or "gateway_unreachable_before_model_call" in stderr
+
+
+def run_formal_native_with_busy_retry(
+    cmd: list[str],
+    *,
+    timeout: int,
+    wait_seconds: int | None,
+    text: bool,
+    capture_output: bool,
+) -> subprocess.CompletedProcess[str]:
+    attempts = max(1, NATIVE_BUSY_MAX_ATTEMPTS)
+    completed: subprocess.CompletedProcess[str] | None = None
+    for attempt in range(1, attempts + 1):
+        completed = run_native_openclaw_model_call(
+            cmd,
+            timeout=timeout,
+            wait_seconds=wait_seconds,
+            text=text,
+            capture_output=capture_output,
+            check=False,
+        )
+        if not is_retryable_native_lane_busy(completed) or attempt >= attempts:
+            return completed
+        delay = min(NATIVE_BUSY_BACKOFF_MAX_SECONDS, NATIVE_BUSY_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+        delay += random.uniform(0, min(1.0, delay / 2))
+        time.sleep(delay)
+    assert completed is not None
+    return completed
+
+
 def run_openclaw_model_call(
     cmd: list[str],
     *,
@@ -169,15 +483,35 @@ def run_openclaw_model_call(
     wait_seconds: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if is_openclaw_agent_command(cmd) and is_formal_gpt_required_command(cmd):
+        request_prompt = _extract_prompt(cmd)
         cmd = with_prompt_artifact_transport(cmd)
-        completed = run_native_openclaw_model_call(
+        completed = run_formal_native_with_busy_retry(
             cmd,
             timeout=timeout,
             wait_seconds=wait_seconds,
             text=text,
             capture_output=capture_output,
-            check=check,
         )
+        if (
+            _formal_fallback_enabled()
+            and _is_formal_command_for_fallback(cmd)
+            and _is_formal_usage_limit_cooldown_failure(completed)
+            and request_prompt
+        ):
+            fallback_reason = _formal_fallback_reason(completed)
+            fallback = _run_openai_compatible_fallback(
+                cmd=cmd,
+                timeout=timeout,
+                prompt=request_prompt,
+                session_id=_option(cmd, "--session-id", "formal-openai-compatible-fallback"),
+                fallback_reason=fallback_reason,
+            )
+            if fallback is not None:
+                if check and fallback.returncode != 0:
+                    raise subprocess.CalledProcessError(fallback.returncode, cmd, output=fallback.stdout, stderr=fallback.stderr)
+                return fallback
+        if check and completed.returncode != 0:
+            raise subprocess.CalledProcessError(completed.returncode, cmd, output=completed.stdout, stderr=completed.stderr)
         return completed
     completed = completed_from_direct_provider(cmd, timeout=timeout)
     if check and completed.returncode != 0:

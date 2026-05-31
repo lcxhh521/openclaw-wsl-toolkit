@@ -11,12 +11,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(os.environ.get("OPENCLAW_MAILBOX_ROOT", str(Path.home() / ".openclaw" / "workspace" / "codex-main-bridge")))
+from mailbox_paths import CODE_ROOT, MAILBOX_ROOT as ROOT
 TURN_FILE = ROOT / "turn.json"
 CODEX_FILE = ROOT / "codex_to_main.md"
 MAIN_FILE = ROOT / "main_to_codex.md"
 LOCK_FILE = ROOT / ".mailbox-write.lock"
-ARCHIVE_SCRIPT = ROOT / "archive_mailbox_turn.py"
+ARCHIVE_SCRIPT = CODE_ROOT / "archive_mailbox_turn.py"
+ROLLOVER_SCRIPT = CODE_ROOT / "context_rollover.py"
+DEFAULT_ROLLOVER_THRESHOLD = int(os.environ.get("OPENCLAW_MAILBOX_CONTEXT_ROLLOVER_THRESHOLD", "1000"))
 
 
 def now_iso() -> str:
@@ -60,7 +62,7 @@ def archive(event: str, actor: str, note: str) -> int:
         return 0
     proc = subprocess.run(
         [sys.executable, str(ARCHIVE_SCRIPT), "--event", event, "--actor", actor, "--note", note],
-        cwd=str(ROOT),
+        cwd=str(CODE_ROOT),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -71,6 +73,72 @@ def archive(event: str, actor: str, note: str) -> int:
     if proc.stderr.strip():
         print(proc.stderr.strip(), file=sys.stderr)
     return proc.returncode
+
+
+def ensure_context_rollover(seq: int) -> dict[str, Any]:
+    if not ROLLOVER_SCRIPT.exists():
+        return {"available": False, "ok": True, "reason": "missing_context_rollover_script"}
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(ROLLOVER_SCRIPT),
+            "ensure",
+            "--current-seq",
+            str(seq),
+            "--threshold",
+            str(DEFAULT_ROLLOVER_THRESHOLD),
+            "--json",
+        ],
+        cwd=str(ROOT),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return {
+            "available": True,
+            "ok": False,
+            "returncode": proc.returncode,
+            "stdout": proc.stdout[-2000:],
+            "stderr": proc.stderr[-2000:],
+        }
+    try:
+        state = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        return {
+            "available": True,
+            "ok": False,
+            "returncode": proc.returncode,
+            "error": f"invalid rollover JSON: {exc}",
+            "stdout": proc.stdout[-2000:],
+            "stderr": proc.stderr[-2000:],
+        }
+    if not isinstance(state, dict):
+        return {"available": True, "ok": False, "error": "rollover state is not an object"}
+    return {"available": True, "ok": True, "state": state}
+
+
+def add_context_fields(turn: dict[str, Any], rollover: dict[str, Any]) -> dict[str, Any]:
+    state = rollover.get("state") if isinstance(rollover, dict) else None
+    if not isinstance(state, dict):
+        if isinstance(rollover, dict) and rollover.get("available"):
+            turn["context_rollover_ok"] = False
+            turn["context_rollover_error"] = str(rollover.get("error") or rollover.get("stderr") or rollover.get("reason") or "unknown")[:500]
+        return turn
+    turn.update(
+        {
+            "context_rollover_ok": True,
+            "context_epoch": state.get("context_epoch"),
+            "context_rollover_source_seq": state.get("rollover_source_seq"),
+            "context_summary_path": state.get("summary_path"),
+            "context_summary_sha256": state.get("summary_sha256"),
+            "context_turns_since_rollover": state.get("turns_since_rollover"),
+            "context_next_rollover_seq": state.get("next_rollover_seq"),
+            "context_rollover_decision": state.get("rollover_decision") or state.get("reason"),
+        }
+    )
+    return turn
 
 
 def main() -> int:
@@ -107,17 +175,27 @@ def main() -> int:
         atomic_write_text(TURN_FILE, json.dumps(new_turn, ensure_ascii=False, indent=2) + "\n")
         archive_rc = archive(event, args.writer, args.note)
 
+        rollover = ensure_context_rollover(seq)
+        new_turn = add_context_fields(new_turn, rollover)
+        atomic_write_text(TURN_FILE, json.dumps(new_turn, ensure_ascii=False, indent=2) + "\n")
+
         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
+    rollover_state = rollover.get("state") if isinstance(rollover, dict) else None
     print(
         json.dumps(
             {
-                "ok": archive_rc == 0,
+                "ok": archive_rc == 0 and bool(rollover.get("ok", True)),
                 "seq": seq,
                 "writer": args.writer,
                 "needs_reply": args.needs_reply,
                 "target": str(target),
                 "archive_returncode": archive_rc,
+                "context_rollover_ok": bool(rollover.get("ok", True)),
+                "context_epoch": rollover_state.get("context_epoch") if isinstance(rollover_state, dict) else None,
+                "context_turns_since_rollover": rollover_state.get("turns_since_rollover") if isinstance(rollover_state, dict) else None,
+                "context_next_rollover_seq": rollover_state.get("next_rollover_seq") if isinstance(rollover_state, dict) else None,
+                "context_rollover_decision": rollover_state.get("rollover_decision") if isinstance(rollover_state, dict) else None,
             },
             ensure_ascii=False,
         )

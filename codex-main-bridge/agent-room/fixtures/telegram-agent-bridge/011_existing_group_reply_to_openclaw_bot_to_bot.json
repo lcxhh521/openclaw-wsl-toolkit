@@ -1,0 +1,36 @@
+{
+  "update_id": 900011,
+  "receiver_agent_id": "codex",
+  "receiver_bot_username": "lchcodex_bot",
+  "message": {
+    "message_id": 8011,
+    "from": {
+      "id": 100000001,
+      "is_bot": false,
+      "first_name": "Alex"
+    },
+    "chat": {
+      "id": -1009000000001,
+      "title": "Openclaw进化",
+      "type": "supergroup"
+    },
+    "date": 1779273011,
+    "text": "这个也按 main 的协调触发理解",
+    "reply_to_message": {
+      "message_id": 7002,
+      "from": {
+        "id": 8685651091,
+        "is_bot": true,
+        "first_name": "OpenClaw Main",
+        "username": "lchopenclaw_bot"
+      },
+      "chat": {
+        "id": -1009000000001,
+        "title": "Openclaw进化",
+        "type": "supergroup"
+      },
+      "date": 1779273010,
+      "text": "OpenClaw previous visible reply"
+    }
+  }
+}

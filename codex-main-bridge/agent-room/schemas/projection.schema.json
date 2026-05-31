@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openclaw.agent_room.projection.v0",
+  "description": "Telegram/UI projection evidence for a canonical artifact or non-canonical comment.",
+  "type": "object",
+  "required": ["schema", "projection_id", "room_id", "source_ref", "target", "created_at", "projected", "canonical_state_advanced"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "const": "openclaw.agent_room.projection.v0" },
+    "projection_id": { "type": "string" },
+    "room_id": { "type": "string" },
+    "source_ref": { "type": "string" },
+    "source_kind": { "type": "string", "enum": ["comment", "task", "decision", "status"] },
+    "target": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": true,
+      "properties": {
+        "kind": { "type": "string", "enum": ["telegram", "local_ui", "file"] },
+        "chat_id": { "type": ["string", "null"] },
+        "message_id": { "type": ["string", "null"] }
+      }
+    },
+    "created_at": { "type": "string" },
+    "projected": { "type": "boolean" },
+    "projection_policy": { "type": "string" },
+    "redaction": { "type": "string", "enum": ["compact", "redacted", "full_requested"] },
+    "body": { "type": "string" },
+    "canonical_state_advanced": { "const": false },
+    "side_effect_gate_changed": { "const": false }
+  }
+}

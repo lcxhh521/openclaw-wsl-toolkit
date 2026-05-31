@@ -1,0 +1,144 @@
+{
+  "schema": "openclaw.agent_room.group_surface_policy.v0",
+  "scope": "Telegram group Agent Room surface only. Private/user notification policy is separate.",
+  "default_language": "zh-CN",
+  "surfaces": {
+    "agent_room_group": {
+      "purpose": "shared collaboration, disagreement, evidence, decisions, and visible mechanism evolution",
+      "not_purpose": "personal notification inbox, raw runtime log stream, private task delivery, secret/account/security discussion"
+    },
+    "private_to_alex": {
+      "policy_ref": "runtime_attention_policy_private_to_alex",
+      "note": "Out of scope for this policy except when group content must be suppressed or moved private for sensitivity."
+    },
+    "log_only": {
+      "purpose": "routine heartbeats, internal runner metadata, non-material retries, duplicate details"
+    }
+  },
+  "allow_visible_group_send_when": [
+    {
+      "key": "direct_mention_response",
+      "description": "A group message directly mentions this agent/bot and the answer is not sensitive."
+    },
+    {
+      "key": "active_group_thread_material_contribution",
+      "description": "The agent has new evidence, a correction, a disagreement, a concrete proposal, or a patch/verification result for the current group thread."
+    },
+    {
+      "key": "group_origin_task_milestone",
+      "description": "A task originated in this group and reached completed/blocker/needs-group-consensus/implemented-and-verified."
+    },
+    {
+      "key": "agent_room_surface_blocker",
+      "description": "The blocker affects group collaboration itself: peer bot cannot speak, duplicate/looping messages, raw JSON/log leak risk, queue stuck, projection failure, or wrong surface routing."
+    },
+    {
+      "key": "decision_record",
+      "description": "The group reached a durable rule/boundary/implementation decision that should be visible to all peer agents."
+    }
+  ],
+  "suppress_or_move_private_when": [
+    "secrets/account/auth/private-path details are needed",
+    "the task was private-origin and group visibility was not explicitly requested",
+    "message only contains routine heartbeat, low-value ack, duplicate agreement, raw stderr/json, or internal queue churn",
+    "the issue is auto-recovered and has no group-visible impact",
+    "multiple agents would repeat the same status without new evidence"
+  ],
+  "message_shape": {
+    "preferred_order": [
+      "结论",
+      "证据",
+      "影响",
+      "下一步"
+    ],
+    "max_visible_detail": "one concise chat message unless explicitly asked for depth",
+    "artifacts": "include only one or two key paths when useful for verification",
+    "forbidden_visible_payloads": [
+      "raw secrets",
+      "raw prompts",
+      "raw runner JSON",
+      "large stderr/stdout dumps",
+      "unredacted tokens",
+      "private chat content"
+    ]
+  },
+  "multi_agent_rules": {
+    "direct_mentions": "mentioned agents answer directly in Chinese when they have material content; main must not default to proxying them",
+    "broadcast_threads": "unmentioned agents may speak only with material evidence/correction/proposal/patch/blocker",
+    "duplicate_control": "same event should have one owner summary; other agents add only deltas or objections",
+    "single_spokesperson": "A request for one visible speaking voice selects the current owner for that turn; it is not a permanent main-only channel. The owner may rotate among openclaw-main, codex, and claude-code based on mention, collaboration role, evidence, or capability; non-owners continue work and only add material deltas.",
+    "bot_to_bot_followup": "visible @ can trigger one bounded peer follow-up round; further loops require material new evidence or owner decision",
+    "owner_summary": "for implementable decisions, the current owner posts one concise final summary after verification"
+  },
+  "automatic_local_action_allowed": [
+    "write/update local policy artifacts",
+    "write/update local config for Agent Room surface routing",
+    "add local smoke/check scripts",
+    "run py_compile/smoke/diff-check/read-only inspections",
+    "patch group-surface projection/gating bugs inside workspace when reversible and scoped"
+  ],
+  "automatic_bounded_runtime_action_allowed": [
+    "run low-cost non-publishing smoke against an already configured provider/model route when credentials are already available to that runner and artifacts redact secrets",
+    "update local smoke status artifacts or policy evidence references after successful existing-route verification"
+  ],
+  "record_blocker_or_handoff_instead_of_asking_alex_when": [
+    "the current agent lacks network, credential, tool, or native runtime permission for an otherwise routine smoke",
+    "another active room peer or openclaw-main can run the same bounded check inside existing permission boundaries"
+  ],
+  "requires_alex_or_private_confirmation": [
+    "external publish outside this group",
+    "gateway restart or service lifecycle changes",
+    "secrets/auth/token/account access changes",
+    "privacy-sensitive disclosure from private sessions",
+    "destructive cleanup, deletion, migration, push/PR/deploy",
+    "cost or quota policy changes beyond existing budget"
+  ],
+  "rate_limits": {
+    "routine_progress_group": "avoid; prefer no message or one milestone",
+    "owner_status_card": "at most one active status per group-origin task when supported",
+    "same_blocker_repeat": "suppress duplicates unless impact changes or previous notice is stale"
+  },
+  "updated_at": "2026-05-29T02:12:50+08:00",
+  "runner_status_taxonomy": {
+    "schema": "openclaw.agent_room.runner_status_taxonomy.v0",
+    "updated_at": "2026-05-29T02:12:50+08:00",
+    "source_artifact": "agent-room/artifacts/runner-soft-deadline-false-abnormal-20260529-codex.md",
+    "states": {
+      "executing_no_output_yet": {
+        "meaning": "runner started and has no stdout/stderr/result yet, but is still within runner-attempt soft deadline",
+        "telegram_label": "执行中，暂无输出",
+        "must_not_claim": "progress or completed evidence"
+      },
+      "soft_deadline_attention": {
+        "meaning": "runner exceeded runner-attempt soft deadline but process is still alive",
+        "telegram_label": "执行偏慢，需关注",
+        "must_include": [
+          "owner",
+          "elapsed_or_deadline"
+        ]
+      },
+      "hard_deadline_or_failed": {
+        "meaning": "process died, hard deadline exceeded, or runner produced failed result",
+        "telegram_label": "执行失败/超时",
+        "must_include": [
+          "owner",
+          "impact",
+          "recovery_action"
+        ]
+      },
+      "completed_with_evidence": {
+        "meaning": "result/artifact/smoke exists and can be summarized",
+        "telegram_label": "已完成，有证据",
+        "must_include": [
+          "evidence_or_artifact"
+        ]
+      }
+    },
+    "rules": [
+      "Never show red abnormal solely because a new runner inherited an old parent soft deadline.",
+      "Never imply useful progress from runner/process presence alone.",
+      "If there is no visible output yet, show executing/waiting plus whether it is still within expected runner time.",
+      "User-targeted runner hard failure must become a Chinese blocker with owner, impact, and recovery_action."
+    ]
+  }
+}

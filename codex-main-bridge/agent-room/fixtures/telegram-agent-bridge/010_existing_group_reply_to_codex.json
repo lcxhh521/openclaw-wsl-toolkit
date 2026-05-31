@@ -1,0 +1,36 @@
+{
+  "update_id": 900010,
+  "receiver_agent_id": "claude-code",
+  "receiver_bot_username": "lchclaudecode_bot",
+  "message": {
+    "message_id": 8010,
+    "from": {
+      "id": 100000001,
+      "is_bot": false,
+      "first_name": "Alex"
+    },
+    "chat": {
+      "id": -1009000000001,
+      "title": "Openclaw进化",
+      "type": "supergroup"
+    },
+    "date": 1779273010,
+    "text": "这条按引用对象来回",
+    "reply_to_message": {
+      "message_id": 7001,
+      "from": {
+        "id": 8900971091,
+        "is_bot": true,
+        "first_name": "Codex",
+        "username": "lchcodex_bot"
+      },
+      "chat": {
+        "id": -1009000000001,
+        "title": "Openclaw进化",
+        "type": "supergroup"
+      },
+      "date": 1779273009,
+      "text": "Codex previous visible reply"
+    }
+  }
+}

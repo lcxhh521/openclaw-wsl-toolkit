@@ -19,6 +19,7 @@ from typing import Any
 
 ROOT = Path(os.environ.get("OPENCLAW_MAILBOX_ROOT", str(Path.home() / ".openclaw" / "workspace" / "codex-main-bridge")))
 ROOM_FILE = ROOT / "room.json"
+AGENT_ROOM_DIR = ROOT / "agent-room" / "rooms"
 EVENT_ROOT = ROOT / "foreground-notify"
 EVENTS_JSONL = EVENT_ROOT / "events.jsonl"
 DEDUPE_STATE = EVENT_ROOT / "dedupe_state.json"
@@ -125,12 +126,23 @@ def load_policy(room: dict[str, Any]) -> dict[str, Any]:
         "channel": str(policy.get("channel") or DEFAULT_CHANNEL),
         "target": str(policy.get("target") or ""),
         "target_env": str(policy.get("target_env") or "OPENCLAW_FOREGROUND_NOTIFY_TARGET"),
+        "target_surface": str(policy.get("target_surface") or "telegram_dm"),
+        "target_from_room_chat_id": as_bool(policy.get("target_from_room_chat_id")),
         "default_dry_run": bool(policy.get("default_dry_run", True)),
         "allow_send_requires_flag": bool(policy.get("allow_send_requires_flag", True)),
     }
 
 
-def resolve_target(args: argparse.Namespace, policy: dict[str, Any]) -> tuple[str, str]:
+def resolve_room_file(args: argparse.Namespace) -> Path:
+    if args.room_file:
+        path = Path(str(args.room_file)).expanduser()
+        return path if path.is_absolute() else ROOT / path
+    if args.room_id:
+        return AGENT_ROOM_DIR / str(args.room_id) / "room.json"
+    return ROOM_FILE
+
+
+def resolve_target(args: argparse.Namespace, policy: dict[str, Any], room: dict[str, Any]) -> tuple[str, str]:
     if args.target:
         return args.target, "cli"
     if policy.get("target"):
@@ -138,6 +150,8 @@ def resolve_target(args: argparse.Namespace, policy: dict[str, Any]) -> tuple[st
     target_env = str(policy.get("target_env") or "")
     if target_env and os.environ.get(target_env):
         return str(os.environ[target_env]), f"env:{target_env}"
+    if policy.get("target_from_room_chat_id") and room.get("telegram_chat_id"):
+        return str(room["telegram_chat_id"]), "room.telegram_chat_id"
     return "", "missing"
 
 
@@ -328,6 +342,8 @@ def run_transport(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--room-id", default="", help="Load policy from agent-room/rooms/<room-id>/room.json.")
+    parser.add_argument("--room-file", default="", help="Load policy from an explicit room.json file.")
     parser.add_argument("--event-kind", required=True, choices=ALLOWED_EVENT_KINDS)
     parser.add_argument("--severity", choices=["info", "warning", "error", "critical"], default="info")
     parser.add_argument("--title", required=True)
@@ -349,10 +365,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    room = read_json(ROOM_FILE)
+    room_file = resolve_room_file(args)
+    room = read_json(room_file)
     room_id = str(room.get("room_id") or "unknown-room")
     policy = load_policy(room)
-    target, target_source = resolve_target(args, policy)
+    target, target_source = resolve_target(args, policy, room)
     digest = content_hash(args)
     key = dedupe_key(args, room_id, digest)
     event_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{key[:12]}"
@@ -406,6 +423,7 @@ def main() -> int:
         "event_id": event_id,
         "created_at": now_iso(),
         "room_id": room_id,
+        "room_file": str(room_file),
         "event_kind": args.event_kind,
         "severity": args.severity,
         "dedupe_key": key,
@@ -418,6 +436,7 @@ def main() -> int:
         "transport": policy.get("transport"),
         "openclaw_bin": policy.get("openclaw_bin"),
         "channel": policy.get("channel"),
+        "target_surface": policy.get("target_surface"),
         "target_source": target_source,
         "target_redacted": redact_target(target),
         "message_preview": message,
@@ -436,6 +455,240 @@ def main() -> int:
     write_json_atomic(DEDUPE_STATE, dedupe)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if not send_error else 1
+
+
+def notify(
+    *,
+    room_id: str = "",
+    event_kind: str = "",
+    severity: str = "info",
+    title: str = "",
+    summary: str = "",
+    affected_workflows: list[str] | None = None,
+    baseline_id: str = "",
+    run_id: str = "",
+    seq: str = "",
+    approval_required: bool = False,
+    action_required: str = "",
+    artifacts: list[str] | None = None,
+    target: str = "",
+    dry_run: bool = True,
+    allow_send: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Programmatic entry point for foreground notifications.
+
+    Returns the result dict (same schema as CLI output) without calling
+    sys.exit or printing to stdout.  This is the preferred import for other
+    agent-room modules.
+    """
+    ns = argparse.Namespace(
+        room_id=room_id,
+        room_file="",
+        event_kind=event_kind,
+        severity=severity,
+        title=title,
+        summary=summary,
+        affected_workflow=affected_workflows or [],
+        baseline_id=baseline_id,
+        run_id=run_id,
+        seq=seq,
+        approval_required=str(approval_required),
+        action_required=action_required,
+        artifact=artifacts or [],
+        target=target,
+        dry_run=dry_run,
+        allow_send=allow_send,
+        force=force,
+        verbose=False,
+    )
+    room_file = resolve_room_file(ns)
+    room = read_json(room_file)
+    resolved_room_id = str(room.get("room_id") or room_id or "unknown-room")
+    policy = load_policy(room)
+    resolved_target, target_source = resolve_target(ns, policy, room)
+    digest = content_hash(ns)
+    key = dedupe_key(ns, resolved_room_id, digest)
+    event_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{key[:12]}"
+    message = build_message(ns)
+
+    explicit_dry_run = bool(dry_run)
+    effective_dry_run = True
+    if allow_send and not explicit_dry_run:
+        effective_dry_run = False
+    if explicit_dry_run and allow_send:
+        effective_dry_run = True
+
+    foreground_required = should_foreground(event_kind)
+    would_send = foreground_required and bool(resolved_target)
+    suppressed_reason: str | None = None
+    send_error: str | None = None
+    rc: int | None = None
+    stdout = ""
+    stderr = ""
+    sent = False
+
+    if not foreground_required:
+        suppressed_reason = "archive_only_event_kind"
+    elif not resolved_target:
+        suppressed_reason = "missing_target"
+    elif not effective_dry_run and not allow_send:
+        suppressed_reason = "allow_send_required"
+    elif not effective_dry_run and not (policy.get("enabled") or target):
+        suppressed_reason = "room_policy_disabled"
+
+    dedupe_state = load_dedupe()
+    if suppressed_reason is None:
+        suppress, reason = should_suppress(args=ns, dedupe=dedupe_state, key=key, room_id=resolved_room_id, dry_run=effective_dry_run)
+        if suppress:
+            suppressed_reason = reason
+
+    if suppressed_reason is None:
+        rc, stdout, stderr = run_transport(
+            openclaw_bin=str(policy.get("openclaw_bin") or DEFAULT_OPENCLAW_BIN),
+            channel=str(policy.get("channel") or DEFAULT_CHANNEL),
+            target=resolved_target,
+            message=message,
+            dry_run=effective_dry_run,
+        )
+        sent = bool(not effective_dry_run and rc == 0)
+        if rc != 0:
+            send_error = redact_transport_output(stderr[-2000:] or stdout[-2000:] or f"transport returned {rc}", resolved_target)
+
+    result = {
+        "schema": "foreground-notify-result.v0",
+        "event_id": event_id,
+        "created_at": now_iso(),
+        "room_id": resolved_room_id,
+        "room_file": str(room_file),
+        "event_kind": event_kind,
+        "severity": severity,
+        "dedupe_key": key,
+        "content_hash": digest,
+        "dry_run": effective_dry_run,
+        "would_send": would_send,
+        "sent": sent,
+        "suppressed_reason": suppressed_reason,
+        "send_error": send_error,
+        "transport": policy.get("transport"),
+        "target_surface": policy.get("target_surface"),
+        "target_source": target_source,
+        "target_redacted": redact_target(resolved_target),
+        "message_preview": message,
+        "artifacts": artifacts or [],
+        "approval_required": approval_required,
+    }
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    result_path = RESULTS_DIR / f"{event_id}.json"
+    result["result_path"] = str(result_path)
+    write_json_atomic(result_path, result)
+    append_jsonl(EVENTS_JSONL, result)
+    dedupe_state = update_dedupe(dedupe=dedupe_state, key=key, event_id=event_id, room_id=resolved_room_id, sent=sent, suppressed_reason=suppressed_reason)
+    write_json_atomic(DEDUPE_STATE, dedupe_state)
+    return result
+
+
+def detect_foreground_events(
+    *,
+    agent_id: str,
+    run_id: str | None,
+    comment: dict[str, Any],
+    reply_result: dict[str, Any],
+    room_id: str = "",
+) -> list[dict[str, Any]]:
+    """Detect qualifying events from an agent reply result and trigger foreground notifications.
+
+    Returns a list of foreground-notify result dicts for events that were
+    detected and processed.  Only dry-run notifications are triggered by
+    default; actual sends require room policy enabled + allow_send.
+    """
+    events: list[dict[str, Any]] = []
+    blockers = comment.get("blockers") if isinstance(comment.get("blockers"), list) else []
+    blocker_set = {str(b).strip().lower() for b in blockers if str(b).strip()}
+    title = str(comment.get("title") or "")
+    body = str(comment.get("body") or "")
+
+    # Event 1: needs_approval — agent explicitly signals it needs human approval
+    if "needs_approval" in blocker_set or "需要批准" in body[:200]:
+        events.append(notify(
+            room_id=room_id,
+            event_kind="needs_approval",
+            severity="warning",
+            title=f"{agent_id} 需要批准" if not title else title,
+            summary=body[:300] if body else "Agent 请求人工批准后才可继续。",
+            affected_workflows=[run_id] if run_id else [],
+            run_id=run_id or "",
+            approval_required=True,
+            action_required="请确认是否允许继续执行",
+            artifacts=[],
+        ))
+
+    # Event 2: blocked — agent is stuck and cannot proceed
+    if "blocked" in blocker_set and "needs_approval" not in blocker_set:
+        blocked_reason = str(comment.get("blocked_reason") or "")
+        events.append(notify(
+            room_id=room_id,
+            event_kind="blocked",
+            severity="warning",
+            title=f"{agent_id} 被阻塞" if not title else title,
+            summary=blocked_reason or body[:300] or "Agent 无法继续执行。",
+            affected_workflows=[run_id] if run_id else [],
+            run_id=run_id or "",
+            approval_required=False,
+            action_required="知道即可；如能解除阻塞请告知",
+            artifacts=[],
+        ))
+
+    # Event 3: quality_change — when the reply itself signals a quality surface change
+    if "quality_change" in blocker_set or "质量变更" in body[:200] or "质量面变更" in body[:200]:
+        events.append(notify(
+            room_id=room_id,
+            event_kind="quality_change",
+            severity="warning",
+            title=title or "质量面变更",
+            summary=body[:300] or "检测到质量面变更，需要前台确认。",
+            affected_workflows=[run_id] if run_id else [],
+            run_id=run_id or "",
+            approval_required=True,
+            action_required="请确认后才允许进入生产",
+            artifacts=[],
+        ))
+
+    # Event 4: collaboration_finished — when the agent signals work completion
+    # Only trigger if the comment explicitly mentions completion AND has artifacts
+    has_artifacts = bool(comment.get("artifacts") or comment.get("result_paths"))
+    completion_markers = {"collaboration_finished", "协作完成"}
+    if has_artifacts and completion_markers.intersection(blocker_set):
+        events.append(notify(
+            room_id=room_id,
+            event_kind="collaboration_finished",
+            severity="info",
+            title=title or "协作任务完成",
+            summary=body[:300] or "协作任务已完成。",
+            affected_workflows=[run_id] if run_id else [],
+            run_id=run_id or "",
+            approval_required=False,
+            action_required="知道即可",
+            artifacts=[str(p) for p in (comment.get("artifacts") or comment.get("result_paths") or [])][:3],
+        ))
+
+    # Event 5: send failure — reply was supposed to go out but failed
+    if reply_result.get("would_send") and not reply_result.get("sent") and reply_result.get("suppressed_reason") not in {"agent_no_comment", "duplicate_reply_already_sent"}:
+        events.append(notify(
+            room_id=room_id,
+            event_kind="blocked",
+            severity="warning",
+            title=f"{agent_id} 回复发送失败",
+            summary=f"Agent 回复未能送达 Telegram：{reply_result.get('suppressed_reason') or reply_result.get('telegram_error') or 'unknown'}",
+            affected_workflows=[run_id] if run_id else [],
+            run_id=run_id or "",
+            approval_required=False,
+            action_required="检查发送通道是否正常",
+            artifacts=[],
+        ))
+
+    return events
 
 
 if __name__ == "__main__":

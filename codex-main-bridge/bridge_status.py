@@ -11,8 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from mailbox_paths import MAILBOX_ROOT, pointer_status
 
-DEFAULT_MAILBOX = Path(os.environ.get("OPENCLAW_MAILBOX_ROOT", str(Path.home() / ".openclaw" / "workspace" / "codex-main-bridge")))
+
+DEFAULT_MAILBOX = MAILBOX_ROOT
 
 
 def read_json(path: Path) -> dict[str, Any] | None:
@@ -95,6 +97,7 @@ def classify(
     now = datetime.now().astimezone()
     turn_path = mailbox / "turn.json"
     watcher_path = mailbox / ".openclaw_main_watcher_state.json"
+    pointer = pointer_status()
     active_run_path = mailbox / "watch-runs" / "active-run.json"
     turn = read_json(turn_path)
     watcher = read_json(watcher_path) or {}
@@ -106,6 +109,7 @@ def classify(
             "status": "missing_turn",
             "severity": "critical",
             "mailbox": str(mailbox),
+        "turn_path": str(turn_path),
             "turn_path": str(turn_path),
             "checked_at": now.isoformat(timespec="seconds"),
         }
@@ -177,7 +181,11 @@ def classify(
         "status": status,
         "severity": severity,
         "blocking_side": blocking_side,
+        "waiting_on": blocking_side or "none",
         "seq": seq,
+        "active_epoch": pointer.get("active_epoch"),
+        "active_data_root": pointer.get("active_data_root"),
+        "namespace_rollover_active": pointer.get("namespace_rollover_active"),
         "needs_reply": owner,
         "last_writer": turn.get("last_writer"),
         "turn_updated_at": turn.get("updated_at"),

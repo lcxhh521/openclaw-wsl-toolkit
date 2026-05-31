@@ -276,12 +276,48 @@ def analyze_articles_with_cache(
 def validate_formal_gpt_provenance(payload: dict[str, Any], settings: dict[str, Any]) -> None:
     expected_model = str(settings.get("model") or "openai-codex/gpt-5.5").strip()
     actual_model = str(payload.get("actual_model") or "").strip()
-    if payload.get("final_body_provenance") != "native_openclaw_gateway_gpt":
+    provenance = str(payload.get("final_body_provenance") or "")
+    if provenance == "external_openai_compatible_fallback":
+        if payload.get("direct_provider_compat_used") is not True:
+            raise RuntimeError("formal GPT fallback provenance exists but direct_provider_compat_used flag is false")
+        return
+    if provenance != "native_openclaw_gateway_gpt":
         raise RuntimeError("formal GPT provenance missing")
     if actual_model != expected_model:
         raise RuntimeError(f"formal GPT model mismatch: {actual_model} != {expected_model}")
     if payload.get("direct_provider_compat_used") is not False:
         raise RuntimeError("formal GPT direct provider compatibility flag is not false")
+
+
+def parse_formal_openai_fallback(stderr: str) -> dict[str, Any] | None:
+    if not stderr:
+        return None
+    for line in (stderr or "").splitlines():
+        if "[FALLBACK] ark->openai-compatible" not in line:
+            continue
+        marker: dict[str, Any] = {
+            "fallback_used": True,
+            "fallback_profile": "openai-compatible",
+        }
+        match_model = re.search(r"openai-compatible:([^\s]+)", line)
+        if not match_model:
+            match_model = re.search(r"model=([^\s]+)", line)
+        if match_model:
+            marker["fallback_model"] = match_model.group(1)
+        match_requested = re.search(r"requested=([^\s]+)", line)
+        if match_requested:
+            marker["requested_model"] = match_requested.group(1)
+        match_reason = re.search(r"reason=([^\s]+)", line)
+        if match_reason:
+            marker["fallback_reason"] = match_reason.group(1)
+        match_finish_reason = re.search(r"finish_reason=([^\s]+)", line)
+        if match_finish_reason:
+            marker["fallback_finish_reason"] = match_finish_reason.group(1)
+        match_truncated = re.search(r"truncated=(\d+|true|false)", line, flags=re.IGNORECASE)
+        if match_truncated:
+            marker["fallback_truncated"] = match_truncated.group(1).lower() in {"1", "true"}
+        return marker
+    return None
 
 
 def compact(text: Any) -> str:
@@ -902,18 +938,32 @@ def run_openclaw_json_prompt(
     if payload and completed.returncode == 0:
         meta = (payload.get("meta") or {}).get("agentMeta") or {}
         direct = meta.get("directProvider") or {}
-        if direct:
+        fallback = parse_formal_openai_fallback(completed.stderr)
+        if direct and not fallback:
             raise RuntimeError(
                 "formal GPT-required prompt resolved to direct provider; refusing publishable body. "
                 f"actual_model={direct.get('model')}; provider={direct.get('provider_profile')}"
             )
+        actual_model = str((fallback or {}).get("fallback_model") or direct.get("model") or model)
         payload["_model_provenance"] = {
             "requested_model": model,
-            "resolved_lane": "native_openclaw_gateway",
-            "actual_model": model,
-            "direct_provider_compat_used": False,
-            "final_body_provenance": "native_openclaw_gateway_gpt",
+            "resolved_lane": "external_openai_compatible_fallback" if fallback else "native_openclaw_gateway",
+            "actual_model": actual_model,
+            "direct_provider_compat_used": bool(fallback),
+            "final_body_provenance": "external_openai_compatible_fallback" if fallback else "native_openclaw_gateway_gpt",
         }
+        if fallback:
+            payload["_model_provenance"]["fallback_used"] = True
+            payload["_model_provenance"]["fallback_profile"] = fallback.get("fallback_profile")
+            if fallback.get("fallback_reason"):
+                payload["_model_provenance"]["fallback_reason"] = fallback.get("fallback_reason")
+            if fallback.get("fallback_model"):
+                payload["_model_provenance"]["fallback_model"] = fallback.get("fallback_model")
+            if fallback.get("requested_model"):
+                payload["_model_provenance"]["fallback_requested_model"] = fallback.get("requested_model")
+            if "fallback_finish_reason" in fallback:
+                payload["_model_provenance"]["fallback_finish_reason"] = fallback.get("fallback_finish_reason")
+            payload["_model_provenance"]["fallback_truncated"] = bool(fallback.get("fallback_truncated"))
         return payload
     raise RuntimeError(
         "OpenClaw JSON prompt failed. "
@@ -1005,8 +1055,10 @@ def openclaw_article_analysis(
         )
         body_provenance = full_provenance or structured_provenance
         if (
-            body_provenance.get("final_body_provenance") != "native_openclaw_gateway_gpt"
-            or structured_provenance.get("final_body_provenance") != "native_openclaw_gateway_gpt"
+            body_provenance.get("final_body_provenance")
+            not in {"native_openclaw_gateway_gpt", "external_openai_compatible_fallback"}
+            or structured_provenance.get("final_body_provenance")
+            not in {"native_openclaw_gateway_gpt", "external_openai_compatible_fallback"}
         ):
             raise RuntimeError("split People's Daily analysis missing native GPT provenance")
         payload = {
@@ -1056,22 +1108,36 @@ def openclaw_article_analysis(
     if payload and completed.returncode == 0:
         meta = (payload.get("meta") or {}).get("agentMeta") or {}
         direct = meta.get("directProvider") or {}
-        if direct:
+        fallback = parse_formal_openai_fallback(completed.stderr)
+        if direct and not fallback:
             raise RuntimeError(
                 "formal GPT-required prompt resolved to direct provider; refusing publishable body. "
                 f"actual_model={direct.get('model')}; provider={direct.get('provider_profile')}"
             )
+        actual_model = str((fallback or {}).get("fallback_model") or direct.get("model") or model)
         validate_analysis_payload(payload, article, settings or {})
         payload.update(analysis_prompt_metadata(settings or {}))
         payload.update(
             {
                 "requested_model": model,
-                "resolved_lane": "native_openclaw_gateway",
-                "actual_model": model,
-                "direct_provider_compat_used": False,
-                "final_body_provenance": "native_openclaw_gateway_gpt",
+                "resolved_lane": "external_openai_compatible_fallback" if fallback else "native_openclaw_gateway",
+                "actual_model": actual_model,
+                "direct_provider_compat_used": bool(fallback),
+                "final_body_provenance": "external_openai_compatible_fallback" if fallback else "native_openclaw_gateway_gpt",
             }
         )
+        if fallback:
+            payload["fallback_used"] = True
+            payload["fallback_profile"] = fallback.get("fallback_profile")
+            if fallback.get("fallback_reason"):
+                payload["fallback_reason"] = fallback.get("fallback_reason")
+            if fallback.get("fallback_model"):
+                payload["fallback_model"] = fallback.get("fallback_model")
+            if fallback.get("requested_model"):
+                payload["fallback_requested_model"] = fallback.get("requested_model")
+            if "fallback_finish_reason" in fallback:
+                payload["fallback_finish_reason"] = fallback.get("fallback_finish_reason")
+            payload["fallback_truncated"] = bool(fallback.get("fallback_truncated"))
         payload["source"] = "openclaw"
         payload["returncode"] = completed.returncode
         return payload
@@ -1163,22 +1229,36 @@ def openclaw_issue_overview(
     if payload and completed.returncode == 0:
         meta = (payload.get("meta") or {}).get("agentMeta") or {}
         direct = meta.get("directProvider") or {}
-        if direct:
+        fallback = parse_formal_openai_fallback(completed.stderr)
+        if direct and not fallback:
             raise RuntimeError(
                 "formal GPT-required overview resolved to direct provider; refusing publishable body. "
                 f"actual_model={direct.get('model')}; provider={direct.get('provider_profile')}"
             )
         validate_overview_payload(payload, settings)
+        actual_model = str((fallback or {}).get("fallback_model") or direct.get("model") or model)
         payload.update(prompt_metadata(settings))
         payload.update(
             {
                 "requested_model": model,
-                "resolved_lane": "native_openclaw_gateway",
-                "actual_model": model,
-                "direct_provider_compat_used": False,
-                "final_body_provenance": "native_openclaw_gateway_gpt",
+                "resolved_lane": "external_openai_compatible_fallback" if fallback else "native_openclaw_gateway",
+                "actual_model": actual_model,
+                "direct_provider_compat_used": bool(fallback),
+                "final_body_provenance": "external_openai_compatible_fallback" if fallback else "native_openclaw_gateway_gpt",
             }
         )
+        if fallback:
+            payload["fallback_used"] = True
+            payload["fallback_profile"] = fallback.get("fallback_profile")
+            if fallback.get("fallback_reason"):
+                payload["fallback_reason"] = fallback.get("fallback_reason")
+            if fallback.get("fallback_model"):
+                payload["fallback_model"] = fallback.get("fallback_model")
+            if fallback.get("requested_model"):
+                payload["fallback_requested_model"] = fallback.get("requested_model")
+            if "fallback_finish_reason" in fallback:
+                payload["fallback_finish_reason"] = fallback.get("fallback_finish_reason")
+            payload["fallback_truncated"] = bool(fallback.get("fallback_truncated"))
         payload["source"] = "openclaw"
         payload["returncode"] = completed.returncode
         return payload

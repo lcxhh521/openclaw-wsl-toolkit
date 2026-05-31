@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "OpenClaw Ark Quota Bridge",
+  "version": "0.1.0",
+  "description": "Reads visible Ark Coding Plan quota percentages from Volcengine console and posts them to the local OpenClaw quota cache.",
+  "permissions": [],
+  "host_permissions": [
+    "https://console.volcengine.com/*",
+    "https://www.volcengine.com/*",
+    "http://127.0.0.1:18793/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://console.volcengine.com/*", "https://www.volcengine.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

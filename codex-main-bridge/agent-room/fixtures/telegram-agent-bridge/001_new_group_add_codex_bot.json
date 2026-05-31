@@ -1,0 +1,9 @@
+{
+  "update_id": 900001,
+  "my_chat_member": {
+    "chat": {"id": -1009000000001, "type": "supergroup", "title": "agent-room-new-smoke"},
+    "from": {"id": 100000001, "is_bot": false, "first_name": "Alex"},
+    "old_chat_member": {"user": {"id": 8900971091, "is_bot": true, "username": "lchcodex_bot"}, "status": "left"},
+    "new_chat_member": {"user": {"id": 8900971091, "is_bot": true, "username": "lchcodex_bot"}, "status": "member"}
+  }
+}

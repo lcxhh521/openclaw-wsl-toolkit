@@ -1,0 +1,10 @@
+{
+  "update_id": 900003,
+  "message": {
+    "message_id": 3003,
+    "chat": {"id": -1009000000001, "type": "supergroup", "title": "openclaw??"},
+    "from": {"id": 100000001, "is_bot": false, "first_name": "Alex"},
+    "date": 1780000003,
+    "text": "@lchcodex_bot ????? agent room ??????????"
+  }
+}

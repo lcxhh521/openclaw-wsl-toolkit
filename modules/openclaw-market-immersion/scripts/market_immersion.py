@@ -121,6 +121,54 @@ def load_env_file(path: Path) -> dict[str, str]:
     return env
 
 
+
+
+def find_continuation_registry_script() -> Path | None:
+    """Locate the workspace-local runtime continuation registry.
+
+    This hook must be best-effort and local-only: market report generation should
+    never fail just because continuation tracking is unavailable.
+    """
+    if os.environ.get("OPENCLAW_CONTINUATION_HOOKS", "1") == "0":
+        return None
+    candidates: list[Path] = []
+    for env_key in ("OPENCLAW_WORKSPACE", "OPENCLAW_WORKSPACE_DIR"):
+        env_root = os.environ.get(env_key)
+        if env_root:
+            candidates.append(Path(env_root).expanduser() / "runtime-continuations" / "continuation_registry.py")
+    for parent in Path(__file__).resolve().parents:
+        candidates.append(parent / "runtime-continuations" / "continuation_registry.py")
+    candidates.append(Path.home() / ".openclaw" / "workspace" / "runtime-continuations" / "continuation_registry.py")
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def run_continuation_registry_command(args: list[str]) -> bool:
+    """Run continuation_registry.py best-effort without leaking output into reports."""
+    registry = find_continuation_registry_script()
+    if registry is None:
+        return False
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(registry), *args],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        return completed.returncode == 0
+    except Exception:
+        return False
+
+
 def safe_name(text: str) -> str:
     keep = []
     for ch in text:
@@ -140,6 +188,37 @@ def normalize_ws(text: Any) -> str:
 
 def now_local() -> dt.datetime:
     return dt.datetime.now().astimezone()
+
+
+def parse_formal_openai_fallback(stderr: str) -> dict[str, Any] | None:
+    if not stderr:
+        return None
+    for line in str(stderr).splitlines():
+        if "[FALLBACK] ark->openai-compatible" not in line:
+            continue
+        marker: dict[str, Any] = {
+            "fallback_used": True,
+            "fallback_profile": "openai-compatible",
+        }
+        match_model = re.search(r"openai-compatible:([^\s]+)", line)
+        if not match_model:
+            match_model = re.search(r"model=([^\s]+)", line)
+        if match_model:
+            marker["fallback_model"] = match_model.group(1)
+        match_requested = re.search(r"requested=([^\s]+)", line)
+        if match_requested:
+            marker["requested_model"] = match_requested.group(1)
+        match_reason = re.search(r"reason=([^\s]+)", line)
+        if match_reason:
+            marker["fallback_reason"] = match_reason.group(1)
+        match_finish_reason = re.search(r"finish_reason=([^\s]+)", line)
+        if match_finish_reason:
+            marker["fallback_finish_reason"] = match_finish_reason.group(1)
+        match_truncated = re.search(r"truncated=(\d+|true|false)", line, flags=re.IGNORECASE)
+        if match_truncated:
+            marker["fallback_truncated"] = match_truncated.group(1).lower() in {"1", "true"}
+        return marker
+    return None
 
 
 def parse_iso(value: str | None) -> dt.datetime | None:
@@ -3761,6 +3840,7 @@ def generate_openclaw_digest(
             transient_retry_sleep(last_error, attempt)
             continue
         try:
+            formal_fallback = parse_formal_openai_fallback(completed.stderr)
             data = extract_json_object(completed.stdout)
             agent_meta = ((data.get("meta") or {}).get("agentMeta") or {})
             direct_meta = (agent_meta.get("directProvider") or {})
@@ -3770,6 +3850,33 @@ def generate_openclaw_digest(
                 for payload in data.get("payloads", [])
                 if isinstance(payload, dict)
             )
+            if direct_meta and formal_fallback is None:
+                raise RuntimeError(
+                    "formal GPT-required digest resolved to non-fallback direct provider; refusing publishable body. "
+                    f"actual_model={direct_meta.get('model')}; provider={direct_meta.get('provider_profile')}"
+                )
+            resolved_lane = (
+                "external_openai_compatible_fallback"
+                if formal_fallback
+                else "direct_provider" if direct_meta else "native_openclaw_gateway"
+            )
+            actual_model = str(
+                (
+                    formal_fallback.get("fallback_model")
+                    if formal_fallback
+                    else direct_meta.get("model")
+                )
+                or agent_meta.get("model")
+                or execution_trace.get("winnerModel")
+                or model
+            )
+            final_body_provenance = (
+                "external_openai_compatible_fallback"
+                if formal_fallback
+                else ("native_openclaw_gateway_gpt" if not direct_meta else "direct_provider_non_gpt_blocker")
+            )
+            fallback_profile = formal_fallback.get("fallback_profile") if formal_fallback else None
+            fallback_used = bool(formal_fallback) if formal_fallback else bool(execution_trace.get("fallbackUsed")) if execution_trace else None
             digest = extract_json_object(text)
             summary_paragraphs = normalize_summary_paragraphs(digest)
             quality_warnings = summary_quality_warnings(
@@ -3791,13 +3898,19 @@ def generate_openclaw_digest(
                 "model_duration_ms": int((completed_at - model_started_at).total_seconds() * 1000),
                 "requested_model": model,
                 "model": model,
-                "resolved_lane": "direct_provider" if direct_meta else "native_openclaw_gateway",
+                "resolved_lane": resolved_lane,
                 "actual_provider_profile": direct_meta.get("provider_profile") or agent_meta.get("provider") or execution_trace.get("winnerProvider"),
-                "actual_model": direct_meta.get("model") or agent_meta.get("model") or execution_trace.get("winnerModel") or model,
+                "actual_model": actual_model,
                 "direct_provider_compat_used": bool(direct_meta),
-                "fallback_used": bool(execution_trace.get("fallbackUsed")) if execution_trace else None,
+                "fallback_used": fallback_used,
+                "fallback_profile": fallback_profile,
+                "fallback_reason": formal_fallback.get("fallback_reason") if formal_fallback else None,
+                "fallback_model": formal_fallback.get("fallback_model") if formal_fallback else None,
+                "fallback_requested_model": formal_fallback.get("requested_model") if formal_fallback else None,
+                "fallback_finish_reason": formal_fallback.get("fallback_finish_reason") if formal_fallback else None,
+                "fallback_truncated": bool(formal_fallback.get("fallback_truncated")) if formal_fallback else False,
                 "runner": execution_trace.get("runner"),
-                "final_body_provenance": "native_openclaw_gateway_gpt" if not direct_meta else "direct_provider_non_gpt_blocker",
+                "final_body_provenance": final_body_provenance,
                 "agent": agent,
                 "source_input_file": str(source_input_file) if source_input_file else None,
                 "coverage_manifest_file": str(coverage_manifest_file) if coverage_manifest_file else None,
@@ -5023,6 +5136,106 @@ def main() -> int:
     background_task_id = str(task["task_id"])
     background_tasks.add_artifacts(background_task_id, [manifest_path, report_path, checkpoints_dir])
 
+
+    continuation_event_id = f"market-immersion-{run_slug}"
+    continuation_command_label = f"market_immersion.py --phase {args.phase}"
+
+    def continuation_register() -> None:
+        run_continuation_registry_command(
+            [
+                "register",
+                "--event-id",
+                continuation_event_id,
+                "--owner",
+                "openclaw-market-immersion",
+                "--owner-session",
+                background_task_id,
+                "--source-message-id",
+                os.environ.get("OPENCLAW_SOURCE_MESSAGE_ID", f"systemd/supervisor:{background_task_id}"),
+                "--goal",
+                f"生成{day}{run_def['label']}，确保长流程不静默卡住。",
+                "--summary",
+                f"{day}{run_def['label']}已启动，run_slug={run_slug}。",
+                "--state",
+                "running",
+                "--next-action",
+                "执行 collect→classify→digest→quality_check→render→publish→notify；外部发布/通知仍遵循原工作流门禁。",
+                "--lease-minutes",
+                "45",
+                "--stale-minutes",
+                "120",
+                "--evidence",
+                str(manifest_path),
+                "--evidence",
+                str(report_path),
+                "--evidence",
+                str(checkpoints_dir),
+                "--process-pid",
+                str(os.getpid()),
+                "--process-started-at",
+                actual_started_iso,
+                "--command-label",
+                continuation_command_label,
+                "--process-workspace",
+                str(Path.cwd()),
+                "--status-marker-path",
+                str(manifest_path),
+                "--terminal-condition",
+                f"{day}{run_def['label']}完成，或以明确 blocker/失败原因终止并留下证据路径。",
+            ]
+        )
+
+    def continuation_update_stage(stage: str, payload: dict[str, Any], checkpoint_path: Path) -> None:
+        status = str(payload.get("status") or "done")
+        try:
+            next_index = stage_order.index(stage) + 1
+            next_stage = stage_order[next_index] if next_index < len(stage_order) else "terminal"
+        except ValueError:
+            next_stage = "terminal"
+        run_continuation_registry_command(
+            [
+                "update",
+                "--event-id",
+                continuation_event_id,
+                "--state",
+                "running",
+                "--summary",
+                f"{day}{run_def['label']} checkpoint={stage} status={status}。",
+                "--next-action",
+                f"继续执行下一阶段：{next_stage}。",
+                "--lease-minutes",
+                "45",
+                "--stale-minutes",
+                "120",
+                "--evidence",
+                str(checkpoint_path),
+                "--process-pid",
+                str(os.getpid()),
+                "--process-started-at",
+                actual_started_iso,
+                "--command-label",
+                continuation_command_label,
+                "--process-workspace",
+                str(Path.cwd()),
+                "--status-marker-path",
+                str(manifest_path),
+            ]
+        )
+
+    def continuation_complete(summary: str, *paths: Path) -> None:
+        args_list = ["complete", "--event-id", continuation_event_id, "--summary", summary]
+        for path in paths:
+            args_list.extend(["--evidence", str(path)])
+        run_continuation_registry_command(args_list)
+
+    def continuation_block(summary: str, *paths: Path) -> None:
+        args_list = ["block", "--event-id", continuation_event_id, "--summary", summary]
+        for path in paths:
+            args_list.extend(["--evidence", str(path)])
+        run_continuation_registry_command(args_list)
+
+    continuation_register()
+
     def write_checkpoint(stage: str, payload: dict[str, Any]) -> None:
         checkpoint = {
             "stage": stage,
@@ -5031,16 +5244,18 @@ def main() -> int:
             "written_at": now_local().isoformat(timespec="seconds"),
             **payload,
         }
-        (checkpoints_dir / f"{stage}.json").write_text(
+        checkpoint_path = checkpoints_dir / f"{stage}.json"
+        checkpoint_path.write_text(
             json.dumps(checkpoint, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         background_tasks.update_task(
             background_task_id,
-            checkpoint_path=str(checkpoints_dir / f"{stage}.json"),
+            checkpoint_path=str(checkpoint_path),
             metadata={**(background_tasks.load_task(background_task_id).get("metadata") or {}), "last_stage": stage},
             event=f"checkpoint:{stage}",
         )
+        continuation_update_stage(stage, payload, checkpoint_path)
 
     previous_manifest: dict[str, Any] = {}
     if (args.resume or args.from_stage) and manifest_path.exists():
@@ -5116,8 +5331,26 @@ def main() -> int:
         digest_result_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         return digest_result_path
 
+    def has_reusable_collect(previous: dict[str, Any]) -> bool:
+        previous_entries = previous.get("entries")
+        previous_validation = previous.get("validation") or {}
+        invalid_checkpoints = {
+            "phase_window_incomplete_blocked",
+            "empty_report_blocked",
+            "digest_degraded_blocked",
+            "digest_failed",
+        }
+        return bool(
+            isinstance(previous_entries, list)
+            and len(previous_entries) > 0
+            and previous.get("checkpoint") not in invalid_checkpoints
+            and not previous_validation.get("empty_report")
+        )
+
     def can_reuse(stage: str) -> bool:
         if not previous_manifest:
+            return False
+        if stage == "collect" and not has_reusable_collect(previous_manifest):
             return False
         if force_from:
             if stage == "digest" and stage_order.index(stage) < stage_order.index(force_from):
@@ -5366,6 +5599,7 @@ def main() -> int:
         )
         manifest["delivery"] = failure_delivery
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        continuation_block(f"Ark classification failed: {raw_flow_classification.get('error')}", manifest_path, report_path, checkpoints_dir / "classify.json")
         return 5
     write_checkpoint(
         "classify",
@@ -5472,6 +5706,7 @@ def main() -> int:
         print(f"manifest={manifest_path}")
         print(f"entries={len(entries)}")
         print("stopped_after=digest")
+        continuation_complete(f"{day}{run_def['label']}已停止在 digest，等待 main 复核。", manifest_path, checkpoints_dir / "digest.json")
         return 0
 
     if openclaw_digest.get("degraded"):
@@ -5527,6 +5762,7 @@ def main() -> int:
             severity="warning",
             artifact_paths=[manifest_path, report_path, error_path],
         )
+        continuation_block(error_summary, manifest_path, report_path, checkpoints_dir / "digest.json", error_path)
         return 3
 
     if should_block_empty_market_report(phase=args.phase, config=config, all_items=all_items):
@@ -5593,6 +5829,9 @@ def main() -> int:
             severity="warning",
             artifact_paths=[manifest_path, report_path, error_path],
         )
+        print("checkpoint=empty_report_blocked", file=sys.stderr)
+        print("error_kind=no_market_items_collected", file=sys.stderr)
+        continuation_block(error_summary, manifest_path, report_path, error_path)
         return 3
 
     summary_config = config.get("openclaw_summary") or {}
@@ -5661,6 +5900,7 @@ def main() -> int:
             severity="warning",
             artifact_paths=[manifest_path, report_path, error_path],
         )
+        continuation_block(sanitize_user_reason(str(openclaw_digest.get("error") or "empty summary")), manifest_path, report_path, error_path)
         return 3
 
     write_checkpoint(
@@ -5776,6 +6016,7 @@ def main() -> int:
         print(f"manifest={manifest_path}")
         print(f"entries={len(entries)}")
         print("stopped_after=quality_check")
+        continuation_complete(f"{day}{run_def['label']}已停止在 quality_check，等待 main 复核。", manifest_path, checkpoints_dir / "quality_check.json")
         return 0
 
     write_markdown_report(
@@ -5811,6 +6052,7 @@ def main() -> int:
         print(f"manifest={manifest_path}")
         print(f"entries={len(entries)}")
         print("stopped_after=render")
+        continuation_complete(f"{day}{run_def['label']}本地 render 已完成，等待 main 复核。", manifest_path, report_path, checkpoints_dir / "render.json")
         return 0
 
     failures = [e for e in entries if e["returncode"] != 0]
@@ -5850,8 +6092,10 @@ def main() -> int:
             print(f"entries={len(entries)}")
             if failures:
                 print(f"failures={len(failures)}", file=sys.stderr)
+                continuation_block("collection failed; no reliable partial report was available for degraded publication", manifest_path, report_path)
                 return 2
             print(f"api_failures={len(api_failures)}", file=sys.stderr)
+            continuation_block("collection API failed; no reliable partial report was available for degraded publication", manifest_path, report_path)
             return 3
         print(
             f"degraded_collection=failures:{len(failures)},api_failures:{len(api_failures)}; publishing with available items",
@@ -6017,6 +6261,7 @@ def main() -> int:
                 severity="warning",
                 artifact_paths=[manifest_path, report_path, checkpoints_dir / "notify.json"],
             )
+            continuation_block("Telegram Notion 链接通知失败，前序产物已生成。", manifest_path, report_path, checkpoints_dir / "notify.json")
             return 7
     if args.phase != "smoke" and notion_config.get("enabled"):
         if notion_publish_failed:
@@ -6041,6 +6286,7 @@ def main() -> int:
                     severity="error",
                     artifact_paths=[manifest_path, report_path, checkpoints_dir / "publish.json"],
                 )
+                continuation_block(sanitize_user_reason(str(notion_delivery.get("error") or notion_delivery.get("reason") or "")), manifest_path, report_path, checkpoints_dir / "publish.json")
                 return 3
             background_tasks.fail_task(
                 background_task_id,
@@ -6058,6 +6304,7 @@ def main() -> int:
                 severity="warning",
                 artifact_paths=[manifest_path, report_path, checkpoints_dir / "publish.json"],
             )
+            continuation_block(sanitize_user_reason(str(notion_delivery.get("error") or notion_delivery.get("reason") or "not attempted")), manifest_path, report_path, checkpoints_dir / "publish.json")
             return 6
     if args.phase != "smoke":
         state_path = output_root / "state.json"
@@ -6106,6 +6353,7 @@ def main() -> int:
             severity="info",
             artifact_paths=[manifest_path, report_path, checkpoints_dir / "publish.json", checkpoints_dir / "notify.json"],
         )
+    continuation_complete(final_summary if not openclaw_digest.get("degraded") else "当前只生成了降级摘要占位，不满足正式简报要求。", manifest_path, report_path, checkpoints_dir / "publish.json", checkpoints_dir / "notify.json")
     return 0
 
 

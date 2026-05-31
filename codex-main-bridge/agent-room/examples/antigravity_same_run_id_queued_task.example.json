@@ -1,0 +1,57 @@
+{
+  "schema": "openclaw.agent_room.task.v0",
+  "task_id": "antigravity-same-runid-example",
+  "run_id": "antigravity-same-runid-example",
+  "room_id": "mainline-architecture",
+  "requested_by": "codex",
+  "target_agents": [
+    "antigravity"
+  ],
+  "lane": "validation",
+  "brief_path": "agent-room/tasks/antigravity-same-runid-example/brief.md",
+  "context_paths": [
+    "room-mcp/briefs/antigravity-same-runid-example.md",
+    "agent-room/room_contract_p0.md"
+  ],
+  "permissions": {
+    "source_edit": false,
+    "telegram_send": false,
+    "notion_publish": false,
+    "github_push": false,
+    "secrets_access": false,
+    "global_state_change": false,
+    "gui_automation": false,
+    "cli_retry_loop": false
+  },
+  "expected_outputs": [
+    {
+      "type": "comment_jsonl",
+      "path": "agent-comments/antigravity.jsonl",
+      "run_id_must_match": true,
+      "agent_id": "antigravity"
+    }
+  ],
+  "status": "queued",
+  "review_status": "requested",
+  "blocked_reason": null,
+  "result_paths": [],
+  "canonical_imported": false,
+  "created_at": "2026-05-20T03:30:00+08:00",
+  "updated_at": "2026-05-20T03:30:00+08:00",
+  "lease": {
+    "owner": null,
+    "heartbeat_at": null,
+    "expires_at": null
+  },
+  "heartbeat": {
+    "last_seen_at": null
+  },
+  "retry_budget": {
+    "max_attempts": 1,
+    "attempt": 0
+  },
+  "manual_boundary": true,
+  "quality_gate_status": "not_applicable",
+  "side_effect_gate_status": "closed",
+  "telegram_projection_status": "suppressed"
+}

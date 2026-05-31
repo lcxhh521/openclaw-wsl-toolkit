@@ -1,0 +1,336 @@
+#!/usr/bin/env bash
+set -u
+
+STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/openclaw-gateway-recovery"
+STATE_FILE="$STATE_DIR/state"
+STATUS_FILE="$STATE_DIR/status.json"
+LOG_FILE="$STATE_DIR/recovery.log"
+LOCK_FILE="$STATE_DIR/lock"
+
+MODE="${OPENCLAW_GATEWAY_RECOVERY_MODE:-observe}"
+COOLDOWN_SECONDS="${OPENCLAW_GATEWAY_RECOVERY_COOLDOWN_SECONDS:-900}"
+CONFIRM_COUNT="${OPENCLAW_GATEWAY_RECOVERY_CONFIRM_COUNT:-2}"
+STARTUP_GRACE_SECONDS="${OPENCLAW_GATEWAY_RECOVERY_STARTUP_GRACE_SECONDS:-240}"
+MAX_ACTIONS_PER_HOUR="${OPENCLAW_GATEWAY_RECOVERY_MAX_ACTIONS_PER_HOUR:-3}"
+TELEGRAM_PROBE_URL="${OPENCLAW_GATEWAY_RECOVERY_TELEGRAM_PROBE_URL:-https://api.telegram.org}"
+GATEWAY_URL="${OPENCLAW_GATEWAY_RECOVERY_GATEWAY_URL:-http://127.0.0.1:18789/}"
+GATEWAY_SERVICE="${OPENCLAW_GATEWAY_RECOVERY_SERVICE:-openclaw-gateway.service}"
+
+mkdir -p "$STATE_DIR"
+exec 9>"$LOCK_FILE"
+flock -n 9 || exit 0
+
+last_action_at=0
+last_action="none"
+last_reason="initial"
+probe_fail_count=0
+actions_hour_start=0
+actions_hour_count=0
+
+if [[ -r "$STATE_FILE" ]]; then
+  # shellcheck disable=SC1090
+  . "$STATE_FILE" 2>/dev/null || true
+fi
+
+now="$(date +%s)"
+
+log() {
+  printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG_FILE"
+}
+
+shell_quote() {
+  printf '%q' "$1"
+}
+
+write_state() {
+  local tmp="$STATE_FILE.tmp.$$"
+  {
+    printf 'last_action_at=%s\n' "$(shell_quote "$last_action_at")"
+    printf 'last_action=%s\n' "$(shell_quote "$last_action")"
+    printf 'last_reason=%s\n' "$(shell_quote "$last_reason")"
+    printf 'probe_fail_count=%s\n' "$(shell_quote "$probe_fail_count")"
+    printf 'actions_hour_start=%s\n' "$(shell_quote "$actions_hour_start")"
+    printf 'actions_hour_count=%s\n' "$(shell_quote "$actions_hour_count")"
+  } > "$tmp"
+  mv "$tmp" "$STATE_FILE"
+}
+
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  printf '%s' "$value"
+}
+
+write_status() {
+  local network_state="$1"
+  local service_state="$2"
+  local gateway_state="$3"
+  local action="$4"
+  local reason="$5"
+  local cooldown_remaining="$6"
+  local tmp="$STATUS_FILE.tmp"
+
+  {
+    printf '{\n'
+    printf '  "schema": "openclaw.gateway_recovery.v1",\n'
+    printf '  "updated_at": "%s",\n' "$(date -Is)"
+    printf '  "mode": "%s",\n' "$(json_escape "$MODE")"
+    printf '  "network": "%s",\n' "$(json_escape "$network_state")"
+    printf '  "service": "%s",\n' "$(json_escape "$service_state")"
+    printf '  "gateway": "%s",\n' "$(json_escape "$gateway_state")"
+    printf '  "action": "%s",\n' "$(json_escape "$action")"
+    printf '  "reason": "%s",\n' "$(json_escape "$reason")"
+    printf '  "cooldown_remaining_seconds": %s,\n' "$cooldown_remaining"
+    printf '  "probe_fail_count": %s,\n' "$probe_fail_count"
+    printf '  "actions_hour_count": %s\n' "$actions_hour_count"
+    printf '}\n'
+  } > "$tmp"
+  mv "$tmp" "$STATUS_FILE"
+}
+
+load_gateway_proxy_env() {
+  local env_line item
+  env_line="$(systemctl --user show "$GATEWAY_SERVICE" -p Environment --value 2>/dev/null || true)"
+  for item in $env_line; do
+    case "$item" in
+      HTTP_PROXY=*|HTTPS_PROXY=*|ALL_PROXY=*|NO_PROXY=*|http_proxy=*|https_proxy=*|all_proxy=*|no_proxy=*)
+        export "$item"
+        ;;
+    esac
+  done
+
+  export NO_PROXY="${NO_PROXY:-127.0.0.1,localhost,::1}"
+  export no_proxy="${no_proxy:-127.0.0.1,localhost,::1}"
+}
+
+is_network_online() {
+  load_gateway_proxy_env
+  curl -sS --connect-timeout 4 --max-time 8 -o /dev/null "$TELEGRAM_PROBE_URL" >/dev/null 2>&1
+}
+
+gateway_healthy() {
+  curl -sS --connect-timeout 2 --max-time 5 -o /dev/null "$GATEWAY_URL" >/dev/null 2>&1
+}
+
+service_state() {
+  local state
+  state="$(systemctl --user is-active "$GATEWAY_SERVICE" 2>/dev/null || true)"
+  if [[ -z "$state" ]]; then
+    printf 'unknown'
+  else
+    printf '%s' "$state"
+  fi
+}
+
+service_failed() {
+  systemctl --user is-failed --quiet "$GATEWAY_SERVICE" 2>/dev/null
+}
+
+gateway_service_age_seconds() {
+  local started started_epoch
+  started="$(systemctl --user show "$GATEWAY_SERVICE" -p ActiveEnterTimestamp --value 2>/dev/null || true)"
+  [[ -n "$started" && "$started" != "n/a" ]] || return 1
+  started_epoch="$(date -d "$started" +%s 2>/dev/null || true)"
+  [[ -n "$started_epoch" ]] || return 1
+  printf '%s\n' "$((now - started_epoch))"
+}
+
+within_gateway_startup_grace() {
+  local age
+  age="$(gateway_service_age_seconds 2>/dev/null || true)"
+  [[ -n "$age" ]] || return 1
+  (( age < STARTUP_GRACE_SECONDS ))
+}
+
+normalize_mode() {
+  case "$MODE" in
+    observe|recover-start|recover-restart)
+      ;;
+    *)
+      log "invalid mode '$MODE'; falling back to observe"
+      MODE="observe"
+      ;;
+  esac
+}
+
+missing_required_commands() {
+  local missing="" cmd
+  for cmd in systemctl curl date mv; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      missing="${missing:+$missing,}$cmd"
+    fi
+  done
+
+  printf '%s' "$missing"
+}
+
+cooldown_remaining() {
+  local elapsed remaining
+  elapsed=$((now - last_action_at))
+  if (( elapsed >= COOLDOWN_SECONDS )); then
+    printf '0'
+  else
+    remaining=$((COOLDOWN_SECONDS - elapsed))
+    printf '%s' "$remaining"
+  fi
+}
+
+reset_hour_window_if_needed() {
+  if (( actions_hour_start <= 0 || now - actions_hour_start >= 3600 )); then
+    actions_hour_start="$now"
+    actions_hour_count=0
+  fi
+}
+
+can_take_action() {
+  local remaining
+  reset_hour_window_if_needed
+  remaining="$(cooldown_remaining)"
+  if (( remaining > 0 )); then
+    return 1
+  fi
+  if (( actions_hour_count >= MAX_ACTIONS_PER_HOUR )); then
+    return 1
+  fi
+  return 0
+}
+
+record_action() {
+  local action="$1"
+  local reason="$2"
+  reset_hour_window_if_needed
+  last_action_at="$now"
+  last_action="$action"
+  last_reason="$reason"
+  actions_hour_count=$((actions_hour_count + 1))
+  probe_fail_count=0
+}
+
+start_gateway() {
+  local reason="$1"
+  local remaining
+  remaining="$(cooldown_remaining)"
+  if ! can_take_action; then
+    log "$reason; start skipped by cooldown or hourly cap"
+    write_status "online" "$(service_state)" "unknown" "gateway_inactive_cooldown_skip" "$reason" "$remaining"
+    write_state
+    return 0
+  fi
+
+  if systemctl --user start "$GATEWAY_SERVICE"; then
+    record_action "start" "$reason"
+    log "$reason; started $GATEWAY_SERVICE"
+    sleep 2
+    if gateway_healthy; then
+      write_status "online" "$(service_state)" "healthy" "gateway_inactive_started" "$reason" "$(cooldown_remaining)"
+    else
+      write_status "online" "$(service_state)" "probe_failed_after_start" "gateway_inactive_started" "$reason" "$(cooldown_remaining)"
+    fi
+    write_state
+    return 0
+  fi
+
+  log "$reason; start failed for $GATEWAY_SERVICE"
+  record_action "action_failed" "$reason"
+  write_status "online" "$(service_state)" "unknown" "action_failed" "$reason" "$remaining"
+  write_state
+}
+
+restart_gateway() {
+  local reason="$1"
+  local remaining
+  remaining="$(cooldown_remaining)"
+  if ! can_take_action; then
+    log "$reason; restart skipped by cooldown or hourly cap"
+    write_status "online" "$(service_state)" "unhealthy" "cooldown_skip" "$reason" "$remaining"
+    write_state
+    return 0
+  fi
+
+  if systemctl --user restart "$GATEWAY_SERVICE"; then
+    record_action "restart" "$reason"
+    log "$reason; restarted $GATEWAY_SERVICE"
+    sleep 2
+    if gateway_healthy; then
+      write_status "online" "$(service_state)" "healthy" "restart" "$reason" "$(cooldown_remaining)"
+    else
+      write_status "online" "$(service_state)" "probe_failed_after_restart" "restart" "$reason" "$(cooldown_remaining)"
+    fi
+    write_state
+    return 0
+  fi
+
+  log "$reason; restart failed for $GATEWAY_SERVICE"
+  record_action "action_failed" "$reason"
+  write_status "online" "$(service_state)" "unhealthy" "action_failed" "$reason" "$remaining"
+  write_state
+}
+
+normalize_mode
+missing="$(missing_required_commands)"
+if [[ -n "$missing" ]]; then
+  log "missing required command(s): $missing"
+  write_status "unknown" "unknown" "not_checked" "action_failed" "missing_command:${missing}" "$(cooldown_remaining)"
+  write_state
+  exit 0
+fi
+
+if ! is_network_online; then
+  log "network probe unavailable; no gateway recovery action"
+  write_status "offline" "$(service_state)" "not_checked" "network_offline_skip" "network_offline" "$(cooldown_remaining)"
+  write_state
+  exit 0
+fi
+
+svc="$(service_state)"
+failed="false"
+if service_failed; then
+  failed="true"
+fi
+
+if [[ "$svc" != "active" || "$failed" == "true" ]]; then
+  reason="gateway_service_${svc}"
+  if [[ "$failed" == "true" ]]; then
+    reason="gateway_service_failed"
+  fi
+  if [[ "$MODE" == "recover-start" || "$MODE" == "recover-restart" ]]; then
+    start_gateway "$reason"
+  else
+    log "$reason; would start gateway, observe mode"
+    write_status "online" "$svc" "not_checked" "mode_observe_noop" "$reason" "$(cooldown_remaining)"
+    write_state
+  fi
+  exit 0
+fi
+
+if within_gateway_startup_grace; then
+  probe_fail_count=0
+  write_status "online" "$svc" "startup_grace" "healthy_noop" "within_startup_grace" "$(cooldown_remaining)"
+  write_state
+  exit 0
+fi
+
+if gateway_healthy; then
+  probe_fail_count=0
+  write_status "online" "$svc" "healthy" "healthy_noop" "healthy" "$(cooldown_remaining)"
+  write_state
+  exit 0
+fi
+
+probe_fail_count=$((probe_fail_count + 1))
+if (( probe_fail_count < CONFIRM_COUNT )); then
+  log "gateway probe failed once; waiting for confirmation"
+  write_status "online" "$svc" "probe_failed_once" "gateway_probe_failed_observe_only" "waiting_for_confirmation" "$(cooldown_remaining)"
+  write_state
+  exit 0
+fi
+
+if [[ "$MODE" == "recover-restart" ]]; then
+  restart_gateway "gateway_probe_failed_${probe_fail_count}_confirmed"
+else
+  log "gateway probe failed ${probe_fail_count} confirmed time(s); restart disabled in mode $MODE"
+  write_status "online" "$svc" "probe_failed_confirmed" "gateway_probe_failed_observe_only" "mode_${MODE}" "$(cooldown_remaining)"
+  write_state
+fi

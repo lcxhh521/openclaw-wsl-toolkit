@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(os.environ.get("OPENCLAW_MAILBOX_ROOT", str(Path.home() / ".openclaw" / "workspace" / "codex-main-bridge")))
+from mailbox_paths import MAILBOX_ROOT as ROOT
 TURN_FILE = ROOT / "turn.json"
 CODEX_FILE = ROOT / "codex_to_main.md"
 MAIN_FILE = ROOT / "main_to_codex.md"

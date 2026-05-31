@@ -18,17 +18,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(os.environ.get("OPENCLAW_MAILBOX_ROOT", str(Path.home() / ".openclaw" / "workspace" / "codex-main-bridge")))
-ADAPTER_ROOT = ROOT / "codex_adapter"
+from mailbox_paths import CODE_ROOT, MAILBOX_ROOT
+
+ROOT = MAILBOX_ROOT
+CODE_ROOT = CODE_ROOT
+ADAPTER_ROOT = CODE_ROOT / "codex_adapter"
 STATUS_FILE = ADAPTER_ROOT / "status.json"
 HEARTBEAT_FILE = ADAPTER_ROOT / "heartbeat.json"
 ARTIFACT_ROOT = ADAPTER_ROOT / "artifacts"
 TURN_FILE = ROOT / "turn.json"
 CODEX_FILE = ROOT / "codex_to_main.md"
 MAIN_FILE = ROOT / "main_to_codex.md"
-WRITE_MAILBOX = ROOT / "write_mailbox_turn.py"
-ARCHIVE = ROOT / "archive_mailbox_turn.py"
-PROBE = ROOT / "adapter_probe_codex.py"
+WRITE_MAILBOX = CODE_ROOT / "write_mailbox_turn.py"
+ARCHIVE = CODE_ROOT / "archive_mailbox_turn.py"
+PROBE = CODE_ROOT / "adapter_probe_codex.py"
 
 
 def now_iso() -> str:

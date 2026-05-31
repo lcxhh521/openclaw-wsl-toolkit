@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openclaw.agent_room.comment.v0",
+  "description": "Non-canonical agent comment/message input. May be projected, but does not advance task state by itself.",
+  "type": "object",
+  "required": ["schema", "comment_id", "room_id", "speaker", "kind", "created_at", "body", "canonical_state_advanced"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "const": "openclaw.agent_room.comment.v0" },
+    "comment_id": { "type": "string" },
+    "room_id": { "type": "string" },
+    "speaker": { "type": "string" },
+    "run_id": { "type": ["string", "null"] },
+    "task_id": { "type": ["string", "null"] },
+    "seq_observed": { "type": ["integer", "null"] },
+    "kind": {
+      "type": "string",
+      "enum": ["discussion", "status", "question", "proactive_opinion", "review_comment", "risk", "blocker", "quality_change_report"]
+    },
+    "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+    "created_at": { "type": "string" },
+    "body": { "type": "string" },
+    "artifact_refs": { "type": "array", "items": { "type": "string" } },
+    "canonical_state_advanced": { "const": false },
+    "side_effect_gate_changed": { "const": false },
+    "telegram_projection_allowed": { "type": "boolean" },
+    "review_status": {
+      "type": "string",
+      "enum": ["not_requested", "requested", "runner_completed_unreviewed", "fallback_review", "blocked_review", "single_agent_review", "dual_review_pending", "dual_review_verified", "review_accepted", "review_rejected"]
+    }
+  }
+}

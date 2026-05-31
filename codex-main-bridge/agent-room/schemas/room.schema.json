@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openclaw.agent_room.room.v0",
+  "description": "Canonical room metadata. Telegram is projection evidence, not source of truth.",
+  "type": "object",
+  "required": ["schema", "room_id", "created_at", "updated_at", "status", "canonical_root"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "const": "openclaw.agent_room.room.v0" },
+    "room_id": { "type": "string" },
+    "title": { "type": ["string", "null"] },
+    "created_at": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "status": { "type": "string", "enum": ["draft", "active", "paused", "closed"] },
+    "canonical_root": { "type": "string" },
+    "telegram_projection": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "chat_id": { "type": ["string", "null"] },
+        "send_full_transcript": { "type": "boolean" },
+        "policy": { "type": "string" }
+      }
+    },
+    "side_effect_gate_status": {
+      "type": "string",
+      "enum": ["closed", "pending", "open", "used", "failed"]
+    },
+    "quality_gate_status": {
+      "type": "string",
+      "enum": ["not_applicable", "pending", "passed", "failed", "blocked"]
+    }
+  }
+}

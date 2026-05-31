@@ -1,0 +1,12 @@
+[Unit]
+Description=Run OpenClaw Gateway Recovery
+
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=120
+AccuracySec=20
+Unit=openclaw-gateway-recovery.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

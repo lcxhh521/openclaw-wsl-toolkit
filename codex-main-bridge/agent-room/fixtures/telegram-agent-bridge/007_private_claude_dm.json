@@ -1,0 +1,12 @@
+{
+  "update_id": 900007,
+  "receiver_bot_username": "lchclaudecode_bot",
+  "receiver_agent_id": "claude-code",
+  "message": {
+    "message_id": 4007,
+    "chat": {"id": 100000001, "type": "private", "username": "Alex"},
+    "from": {"id": 100000001, "is_bot": false, "first_name": "Alex"},
+    "date": 1780000007,
+    "text": "???? agent ?????????????"
+  }
+}

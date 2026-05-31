@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openclaw.agent_room.task.v0",
+  "description": "Canonical bounded task manifest for one or more room agents.",
+  "type": "object",
+  "required": [
+    "schema",
+    "task_id",
+    "run_id",
+    "room_id",
+    "requested_by",
+    "target_agents",
+    "lane",
+    "status",
+    "created_at",
+    "updated_at",
+    "permissions",
+    "expected_outputs"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "const": "openclaw.agent_room.task.v0" },
+    "task_id": { "type": "string" },
+    "run_id": { "type": "string" },
+    "room_id": { "type": "string" },
+    "requested_by": { "type": "string" },
+    "target_agents": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "lane": {
+      "type": "string",
+      "enum": [
+        "review",
+        "research",
+        "validation",
+        "summarization",
+        "implementation",
+        "advisory",
+        "standing_mainline_discussion",
+        "peer_collaboration_followup",
+        "agent_to_agent_mention",
+        "runtime_takeover"
+      ]
+    },
+    "brief_path": { "type": ["string", "null"] },
+    "context_paths": { "type": "array", "items": { "type": "string" } },
+    "permissions": { "type": "object", "additionalProperties": true },
+    "expected_outputs": { "type": "array", "items": { "type": ["object", "string"], "additionalProperties": true } },
+    "mainline_id": { "type": "string" },
+    "problem_statement": { "type": "string" },
+    "expected_user_value": { "type": "string" },
+    "owner": { "type": "string" },
+    "participants": { "type": "array", "items": { "type": "string" } },
+    "definition_of_done": { "type": ["array", "string"], "items": { "type": "string" } },
+    "approval_gate": { "type": ["object", "string"], "additionalProperties": true },
+    "dedupe_key": { "type": "string" },
+    "next_action": { "type": "string" },
+    "governance_state": {
+      "type": "string",
+      "enum": ["intake", "triage", "plan", "execute", "review", "integrate", "close"]
+    },
+    "governance": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "schema": { "const": "openclaw.agent_room.mainline_governance.v0" },
+        "contract_path": { "type": "string" },
+        "mainline_id": { "type": "string" },
+        "problem_statement": { "type": "string" },
+        "expected_user_value": { "type": "string" },
+        "owner": { "type": "string" },
+        "participants": { "type": "array", "items": { "type": "string" } },
+        "definition_of_done": { "type": ["array", "string"], "items": { "type": "string" } },
+        "approval_gate": { "type": ["object", "string"], "additionalProperties": true },
+        "dedupe_key": { "type": "string" },
+        "next_action": { "type": "string" },
+        "state": {
+          "type": "string",
+          "enum": ["intake", "triage", "plan", "execute", "review", "integrate", "close"]
+        }
+      }
+    },
+    "collaboration": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "schema": { "const": "openclaw.agent_room.collaboration.v0" },
+        "mode": {
+          "type": "string",
+          "enum": ["dynamic_claims", "peer_followup", "runtime_takeover", "auto_review_repair", "standing_mainline_discussion"]
+        },
+        "status": { "type": "string" },
+        "participants": { "type": "array", "items": { "type": "string" } },
+        "role_policy": { "type": "object", "additionalProperties": true },
+        "roles": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "work_items": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "claims": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "handoffs": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "artifacts": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "blockers": { "type": "array", "items": { "type": ["object", "string"], "additionalProperties": true } },
+        "max_rounds": { "type": "integer" }
+      }
+    },
+    "status": { "type": "string", "enum": ["queued", "leased", "running", "blocked", "completed", "failed", "cancelled"] },
+    "review_status": {
+      "type": "string",
+      "enum": [
+        "not_requested",
+        "requested",
+        "runner_completed_unreviewed",
+        "fallback_review",
+        "blocked_review",
+        "single_agent_review",
+        "dual_review_pending",
+        "dual_review_verified",
+        "review_accepted",
+        "review_rejected"
+      ]
+    },
+    "blocked_reason": { "type": ["string", "null"] },
+    "result_paths": { "type": "array", "items": { "type": "string" } },
+    "canonical_imported": { "type": "boolean" },
+    "created_at": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "lease": { "type": "object", "additionalProperties": true },
+    "heartbeat": { "type": "object", "additionalProperties": true },
+    "retry_budget": { "type": "object", "additionalProperties": true },
+    "manual_boundary": { "type": "boolean" },
+    "quality_gate_status": { "type": "string", "enum": ["not_applicable", "pending", "passed", "failed", "blocked"] },
+    "side_effect_gate_status": { "type": "string", "enum": ["closed", "pending", "open", "used", "failed"] },
+    "telegram_projection_status": {
+      "type": "string",
+      "enum": [
+        "not_projected",
+        "pending",
+        "projected",
+        "suppressed",
+        "failed",
+        "room_bridge_gate_only"
+      ]
+    }
+  }
+}

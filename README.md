@@ -69,7 +69,7 @@ Windows
 
 第六块是 translation agent 选装模块。它不是基础安装必需项，只在用户明确需要长文翻译、整书翻译、双语 PDF、翻译排版或专门翻译工作流时启用；它强调 main/Telegram 只做指挥、监督和验收，translation agent 作为隔离执行层通过文件交接、artifact gate 和排版 workflow 交付结果。
 
-第七块是 agent 协作选装模块。它把今晚验证过的 main ↔ Codex mailbox 协作方式整理成独立模块：双方通过 `turn.json` 和 Markdown 消息文件交接，watcher 低频提醒对方继续，不把“进程触发过”误当成“对方已经回复”。这个模块不是基础安装必需项，只有用户明确需要 OpenClaw main 与 Codex/Cursor/Claude Code 等外部 agent 异步协作时才安装。
+第七块是 agent 协作选装模块。它分成两层：`agent-collab/` 是早期 main ↔ Codex mailbox v0，适合低频异步架构讨论；`codex-main-bridge/agent-room/` 是后续沉淀的 Telegram Agent Room，面向群聊前台、私聊 bot、@ 指令、可编辑置顶状态卡、runner 隔离、协作 ledger、主线推进和模型额度/路由可靠性。它们都不是基础安装必需项，只有用户明确需要 OpenClaw main 与 Codex/Claude Code/Antigravity 等外部 agent 协作时才安装。
 
 第八块是可选增强。比如 Jina embeddings、Tavily web search、豆包/火山录音文件识别。这些不是基础安装必需项，只有真的需要语义记忆、联网检索或本地音频处理时再加。
 
@@ -88,6 +88,15 @@ Windows
 |   |-- OPTIONAL_INSTALL.md
 |   |-- examples/
 |   `-- scripts/
+|-- codex-main-bridge/
+|   |-- README.md
+|   |-- *.py
+|   `-- agent-room/
+|       |-- tools/
+|       |-- config/
+|       |-- schemas/
+|       |-- examples/
+|       `-- validators/
 |-- modules/
 |   `-- openclaw-market-immersion/
 |       |-- README.md
@@ -511,6 +520,14 @@ systemctl --user enable --now openclaw-source-interface-verification.timer
 
 `openclaw-market-feed-snapshot.timer` 是接口失效且暂无可用备用接口时的临时兜底快照，不默认启用；当前运行态仍以主源优先和 operator diagnostics 为准，自动 failover / failback 属于待落地的设计目标。
 
+
+## 可选模块：Telegram Agent Room
+
+`codex-main-bridge/agent-room/` 是当前正在演进的多 agent 协作前台。它的目标不是把 Telegram 群当作日志窗口，而是把每个群映射成一个独立 room：群消息进入 room 上下文，所有参与 agent 都能看到有界上下文，@ 只控制第一响应责任，不剥夺其他 agent 观察、补充和协作的权利。
+
+当前公开仓库只同步可复用的基础设施：runtime 工具、状态卡生成、协作 ledger、主线治理、runner 隔离、模型路由可靠性、Telegram ingress 示例、schema、validator 和 smoke 测试。真实 bot token、真实 room 绑定、offset、运行日志、agent brief、prompt、active runner、协作转录和本地状态快照都必须留在本机，不进入 GitHub。
+
+这个模块仍应按“可见、可控、可恢复”来使用：resident runtime 是主路径，timer 只做 watchdog；runner 失败要形成可见 blocker 或失败 artifact，不能静默堵住队列；状态卡只展示当前 room 内的协作状态，不能混入其他房间或全局机器状态；质量面、模型/provider、prompt、发布结构等变更必须主动前台汇报。
 
 ## 可选模块：Agent collaboration v0
 

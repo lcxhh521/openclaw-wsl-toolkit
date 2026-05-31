@@ -1,0 +1,238 @@
+{
+  "schema": "openclaw.agent_room.standing_agenda.v0",
+  "description": "Standing agenda for proactive agent-room discussion. Items here are tracked persistently and can trigger self-initiated tasks when they have not been discussed recently, regardless of incoming Telegram messages.",
+  "updated_at": "2026-05-31T13:28:37+08:00",
+  "enabled": true,
+  "enabled_reason": "2026-05-29: re-enabled after RCA of idle-agent problem (Alex: 为什么codex都闲着). Standing agenda tick has proper suppression gates (fresh_user_task, active_runner, pending_standing_task, cooldown, max_rounds) so it will only create one task at a time when the system is idle. Was disabled with no recorded reason except paused_reason about repeated discussion; dedupe guard is now in place.",
+  "proactive_tick_interval_seconds": 300,
+  "post_completion_idle_rescan_seconds": 60,
+  "failure_recovery": {
+    "enabled": true,
+    "retry_after_seconds": 900,
+    "description": "Blocked/failed/stale standing tasks may retry after 15m without waiting for the 30m quiet-period cooldown; still suppressed by fresh user tasks, active runners, pending standing tasks, and max_attempts_per_item."
+  },
+  "collaboration_tick": {
+    "enabled": false,
+    "max_rounds": 2,
+    "description": "Global default remains off; standing_collaboration_tick enables task-local follow-up only for standing agenda tasks."
+  },
+  "items": [
+    {
+      "id": "bot-to-bot-collaboration-efficiency-loop",
+      "mainline_item_id": "bot_to_bot_collaboration_efficiency_loop",
+      "title": "Bot-to-bot collaboration efficiency loop",
+      "description": "Alex identified bot-to-bot collaboration as a continuous improvement mainline: make agents behave like a real discussion group by tracking per-agent presence, material points, uptake, peer challenges, integrated summaries, degraded quorum, and status surfaces. Success must reduce duplicate work, hidden stalls, and main-as-manual-integrator burden; runner start alone is not success.",
+      "status": "in_progress",
+      "priority": 98,
+      "target_agents": [
+        "codex",
+        "claude-code"
+      ],
+      "last_discussed_at": "2026-05-27T00:00:00+08:00",
+      "last_discussed_task_id": "tg-openclaw-evolution-bot-to-bot-continuous-iteration-20260527",
+      "max_silence_seconds": 1800,
+      "max_rounds": 3,
+      "tags": [
+        "bot-to-bot",
+        "collaboration",
+        "efficiency",
+        "presence",
+        "uptake",
+        "status-surface"
+      ],
+      "acceptance_evidence": [
+        "agent-room/artifacts/bot-to-bot-continuous-iteration-20260527.md",
+        "agent-room/artifacts/point-uptake-contract-20260526.md",
+        "agent-room/collaboration-status/latest.md"
+      ]
+    },
+    {
+      "id": "architecture-intake-to-execution-loop",
+      "mainline_item_id": "architecture_intake_to_execution_loop",
+      "title": "Architecture intake to executable work loop",
+      "description": "Local loop demonstrated: intake packet -> bounded work items -> peer review patches -> smoke artifacts. Live Ark provider acceptance deferred to ark-fallback-deployment standing item. 5/6 acceptance criteria met.",
+      "status": "completed_with_known_limitation",
+      "priority": 95,
+      "target_agents": [
+        "codex",
+        "claude-code"
+      ],
+      "last_discussed_at": "2026-05-28T23:10:00+08:00",
+      "last_discussed_task_id": "standing-openclaw-evolution-architecture-intake-to-execution-loop-62552b48a746",
+      "max_silence_seconds": 1800,
+      "max_rounds": 2,
+      "completion_evidence": [
+        "ARCHITECTURE_INTAKE_PACKET.v0.json valid with all required fields",
+        "5 patches landed: continuation watchdog, dead-runner cleanup, preflight advisory, POINT_KINDS extension, quality gate fix",
+        "5/6 acceptance criteria met; Ark provider acceptance tracked under ark-fallback-deployment"
+      ],
+      "tags": [
+        "architecture",
+        "collaboration",
+        "execution-loop"
+      ]
+    },
+    {
+      "id": "ark-fallback-deployment",
+      "mainline_item_id": "main_ark_fallback_e2e_validation",
+      "title": "Ark fallback deployment status",
+      "description": "openclaw-main-mailbox-watch.py: run_main_via_ark_fallback() deployed in systemd user service. Final-local-fallback queue + inline retry gate implemented and smoked. Paused while Ark weekly quota is exhausted; remaining live provider acceptance should resume only after quota reset or an explicit reopen.",
+      "status": "blocked",
+      "blocked_reason": "Ark weekly quota is exhausted; live Ark acceptance retries cannot produce the missing success evidence and should not consume standing-agenda time.",
+      "blocked_at": "2026-05-31T13:09:13+08:00",
+      "resume_condition": "After Ark quota reset, run one bounded real-provider acceptance pass from a runtime with secret access, attach success/failure evidence, then reopen or close this item.",
+      "pause_evidence": [
+        "agent-room/artifacts/ark-weekly-quota-pause-codex-20260531.md"
+      ],
+      "priority": 80,
+      "target_agents": [
+        "codex",
+        "claude-code"
+      ],
+      "last_discussed_at": "2026-05-26T22:27:00+08:00",
+      "last_discussed_task_id": "tg-openclaw-evolution-7aefcb573bb69f16",
+      "max_silence_seconds": 7200,
+      "tags": [
+        "deployment",
+        "reliability",
+        "fallback"
+      ]
+    },
+    {
+      "id": "proactive-discussion-mechanism",
+      "mainline_item_id": "standing_mainline_discussion_lane",
+      "title": "Agent Room proactive discussion mechanism",
+      "description": "Current Agent Room is purely reactive. Need standing-agenda / proactive-tick mechanism so agents can self-initiate discussion when there are no incoming Telegram messages.",
+      "status": "in_progress",
+      "priority": 90,
+      "target_agents": [
+        "codex",
+        "claude-code"
+      ],
+      "last_discussed_at": "2026-05-22T09:01:00+08:00",
+      "last_discussed_task_id": "tg-openclaw-evolution-35b630d28e1dbff2",
+      "max_silence_seconds": 1800,
+      "tags": [
+        "architecture",
+        "collaboration",
+        "proactive"
+      ]
+    },
+    {
+      "id": "model-routing-reliability",
+      "mainline_item_id": "model_quota_routing",
+      "title": "Model routing reliability",
+      "description": "glm-5.1 routing is live. Need continuous tracking: success rate by model lane, fallback chain effectiveness, Doubao disable coverage.",
+      "status": "open",
+      "priority": 70,
+      "target_agents": [
+        "codex",
+        "claude-code"
+      ],
+      "last_discussed_at": "2026-05-22T02:51:57+08:00",
+      "last_discussed_task_id": "tg-openclaw-evolution-3d3d45e1ea1cf27e",
+      "max_silence_seconds": 14400,
+      "standing_artifact_hooks": [
+        {
+          "type": "model_routing_reliability_snapshot",
+          "since_hours": 24,
+          "focus_models": [
+            "glm-5.1"
+          ]
+        }
+      ],
+      "tags": [
+        "model",
+        "routing",
+        "reliability"
+      ]
+    },
+    {
+      "id": "harvest-lag-fake-running",
+      "mainline_item_id": "harvest_lag_fake_running_cleanup",
+      "title": "Harvest lag / fake-running state cleanup",
+      "description": "Exited runners leave active-runner files unharvested, causing repeated 'same run already running' noise. Need prompt harvest and accurate runner liveness projection.",
+      "status": "open",
+      "priority": 65,
+      "target_agents": [
+        "codex",
+        "claude-code"
+      ],
+      "last_discussed_at": "2026-05-22T08:54:00+08:00",
+      "last_discussed_task_id": null,
+      "max_silence_seconds": 14400,
+      "tags": [
+        "runner",
+        "harvest",
+        "liveness"
+      ]
+    },
+    {
+      "id": "mainline-autonomy-execution-loop",
+      "mainline_item_id": "mainline_autonomy_execution_loop",
+      "title": "Mainline autonomy execution loop",
+      "description": "Improve Agent Room from reactive discussion to autonomous mainline execution: each idle period should pick the highest-value mainline item, create bounded work, force material closure evidence, and surface blockers without waiting for Alex to repeatedly ask.",
+      "status": "in_progress",
+      "priority": 99,
+      "target_agents": [
+        "codex",
+        "claude-code"
+      ],
+      "last_discussed_at": "2026-05-28T00:00:00+08:00",
+      "last_discussed_task_id": null,
+      "max_silence_seconds": 1800,
+      "max_rounds": 3,
+      "tags": [
+        "mainline",
+        "autonomy",
+        "execution-loop",
+        "closure-gate",
+        "architecture"
+      ],
+      "acceptance_evidence": [
+        "agent-room/artifacts/mainline-autonomy-scorecard-20260529-codex.md",
+        "agent-room/artifacts/mainline-autonomy-idle-selection-recovery-codex-20260529.md",
+        "agent-room/tools/smoke_standing_agenda.py"
+      ]
+    }
+  ],
+  "standing_collaboration_tick": {
+    "enabled": true,
+    "max_rounds": 2,
+    "scope": "standing_mainline_tasks_only",
+    "description": "Local task-level peer follow-up for standing agenda tasks so discussions must converge to patch/smoke/RCA/blocker/next split; does not globally enable all collaboration ticks."
+  },
+  "max_attempts_per_item": 3,
+  "standing_reconcile_limit": 50,
+  "standing_reconcile_max_age_seconds": 7200,
+  "paused_reason": "Unpaused 2026-05-29: dedupe guard now in place; re-enabling standing agenda to fix idle-agent problem.",
+  "paused_at": "2026-05-28T23:42:30+08:00",
+  "unpaused_at": "2026-05-29T00:18:30+08:00",
+  "autonomy_improvement_policy": {
+    "schema": "openclaw.agent_room.autonomy_improvement_policy.v0",
+    "updated_at": "2026-05-29T00:28:06+08:00",
+    "scorecard_artifact": "agent-room/artifacts/mainline-autonomy-scorecard-20260529-codex.md",
+    "self_evolution": {
+      "schema": "openclaw.agent_room.autonomy_self_evolution_policy.v0",
+      "enabled": true,
+      "snapshot_path": "agent-room/artifacts/mainline-autonomy-evolution-ledger.jsonl",
+      "repeat_failure_threshold": 2,
+      "repeat_failure_window_hours": 24
+    },
+    "target_scores": {
+      "infrastructure": 85,
+      "stability": 75,
+      "mainline_constraint": 70,
+      "automatic_execution_loop": 65,
+      "multi_agent_autonomous_work": 65
+    },
+    "execution_rules": [
+      "standing tasks must end with artifact/patch/smoke/RCA/blocker plus owner, not discussion only",
+      "mentions assign first-response ownership only; all active agents keep room context visibility",
+      "one stuck runner must not block other agents or the room status surface",
+      "current mailbox state must include active_epoch/active_data_root, never bare seq alone",
+      "proactive work is allowed only when no fresh user task, no active runner, and no pending standing task"
+    ],
+    "user_visible_reporting": "Report only meaningful progress, blocker, decision, or validation result; do not post routine heartbeat noise."
+  }
+}

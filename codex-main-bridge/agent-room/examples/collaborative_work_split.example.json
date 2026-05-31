@@ -1,0 +1,97 @@
+{
+  "schema": "openclaw.agent_room.task.v0",
+  "room_id": "openclaw-evolution",
+  "task_id": "collab-web-service-demo-20260521",
+  "run_id": "collab-web-service-demo-20260521",
+  "created_at": "2026-05-21T19:58:00+08:00",
+  "status": "queued",
+  "target_agents": ["codex", "claude-code"],
+  "delivery_policy": "broadcast_all_agents_decide",
+  "reply_policy": "mentions_choose_first_response_owner; all_agents_observe; speak_when_addressed_or_material; otherwise NO_COMMENT",
+  "source": {
+    "transport": "agent-room-bot-mention",
+    "initiator": "Alex"
+  },
+  "brief_path": "/home/lcxhh/.openclaw/workspace/codex-main-bridge/agent-room/examples/collaborative_work_split.example.brief.md",
+  "collaboration": {
+    "mode": "dynamic_claims",
+    "status": "open",
+    "participants": ["openclaw-main", "codex", "claude-code"],
+    "work_items": [
+      {
+        "id": "wi-001-define-schema",
+        "title": "定义数据库模型和API契约",
+        "description": "定义用户、产品、订单的数据模型，以及REST API契约文档",
+        "owner": "openclaw-main",
+        "assigned_to": "openclaw-main",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": []
+      },
+      {
+        "id": "wi-002-implement-db",
+        "title": "实现数据库层（SQLAlchemy models + CRUD operations）",
+        "description": "基于wi-001定义的schema，实现SQLAlchemy models和CRUD操作函数",
+        "assigned_to": "codex",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": ["wi-001-define-schema"]
+      },
+      {
+        "id": "wi-003-implement-api",
+        "title": "实现API路由层（FastAPI routes）",
+        "description": "基于wi-001定义的API契约，实现FastAPI路由和请求/响应验证",
+        "assigned_to": "claude-code",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": ["wi-001-define-schema"]
+      },
+      {
+        "id": "wi-004-review-codex",
+        "title": "Claude Code审查Codex的数据库层代码",
+        "description": "Claude Code审查wi-002的代码，给出反馈和修改建议",
+        "assigned_to": "claude-code",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": ["wi-002-implement-db"]
+      },
+      {
+        "id": "wi-005-review-claude",
+        "title": "Codex审查Claude Code的API层代码",
+        "description": "Codex审查wi-003的代码，给出反馈和修改建议",
+        "assigned_to": "codex",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": ["wi-003-implement-api"]
+      }
+    ],
+    "roles": [
+      {
+        "role": "architect",
+        "agent_id": "openclaw-main",
+        "responsibilities": ["task_split", "coordination", "final_review"]
+      },
+      {
+        "role": "backend_engineer",
+        "agent_id": "codex",
+        "responsibilities": ["database_layer", "integration_tests"]
+      },
+      {
+        "role": "api_engineer",
+        "agent_id": "claude-code",
+        "responsibilities": ["api_layer", "api_tests"]
+      }
+    ]
+  },
+  "agent_room_profile": "workspace-write",
+  "permissions": {
+    "source_edit": true,
+    "telegram_send": false,
+    "notion_publish": false,
+    "github_push": false,
+    "secrets_access": false,
+    "global_state_change": true,
+    "quality_surface_change": false
+  },
+  "source_scope_dir": "/home/lcxhh/.openclaw/workspace"
+}

@@ -2,8 +2,8 @@
   "id": "volcengine-coding-plan",
   "name": "OpenClaw Volcengine Coding Plan",
   "type": "openclaw-provider-module",
-  "version": "0.1.0",
-  "description": "Documents the Volcengine Ark Coding Plan endpoint and OpenClaw model references.",
+  "version": "0.2.0",
+  "description": "Documents the Volcengine Ark Coding Plan endpoint, OpenClaw model references, and memory-enhancement embedding entitlement.",
   "provider": "volcengine-plan",
   "default_model": "volcengine-plan/ark-code-latest",
   "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
@@ -11,5 +11,27 @@
   "config_files": [
     "~/.openclaw/openclaw.json",
     "~/.openclaw/agents/main/agent/models.json"
-  ]
+  ],
+  "memory_enhancement": {
+    "enabled_config_path": "agents.defaults.memorySearch",
+    "provider": "openai",
+    "model": "doubao-embedding-vision",
+    "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+    "secret_ref": {
+      "source": "env",
+      "id": "VOLCANO_ENGINE_API_KEY"
+    },
+    "smoke_script": "modules/openclaw-volcengine-coding-plan/scripts/check_memory_enhancement.py",
+    "last_live_probe": {
+      "date": "2026-05-25",
+      "http_status": 200,
+      "vector_dimension": 2048,
+      "prompt_tokens": 34
+    },
+    "newly_added_models": {
+      "date": "2026-05-25",
+      "models": ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-reasoner"],
+      "note": "Added per Alex request 2026-05-25 after appearing in the Ark interactive lean preview; wired into Claude Code model policy routes and the local smoke matrix, pending live Ark connectivity smoke for this account."
+    }
+  }
 }

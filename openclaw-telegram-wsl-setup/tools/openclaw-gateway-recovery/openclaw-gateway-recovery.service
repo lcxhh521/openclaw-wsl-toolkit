@@ -1,0 +1,9 @@
+[Unit]
+Description=OpenClaw Gateway Recovery
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.config/openclaw-gateway-recovery.env
+ExecStart=%h/.local/bin/openclaw-gateway-recovery
+Nice=10

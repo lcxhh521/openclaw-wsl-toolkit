@@ -1,0 +1,7 @@
+{
+  "schema": "openclaw.agent_room.paused_agents.v0",
+  "enabled": false,
+  "updated_at": "2026-05-27T10:52:20+08:00",
+  "note": "Claude Code pause disabled per Alex: keep claude-code usable while cch root fix is handled in parallel.",
+  "agents": {}
+}

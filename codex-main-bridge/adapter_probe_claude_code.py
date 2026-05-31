@@ -19,7 +19,8 @@ from typing import Any
 BRIDGE = Path(os.environ.get("OPENCLAW_MAILBOX_ROOT", str(Path.home() / ".openclaw" / "workspace" / "codex-main-bridge")))
 OUT = BRIDGE / "adapter-probes" / "claude-code" / "latest.json"
 WRAPPER = Path(os.environ.get("OPENCLAW_CLAUDE_ACP_WRAPPER", str(Path.home() / ".openclaw" / "acpx" / "claude-agent-acp-wrapper.mjs")))
-SESSION_STATE = Path(os.environ.get("OPENCLAW_CLAUDE_SESSION_STATE", ""))
+SESSION_STATE_ENV = os.environ.get("OPENCLAW_CLAUDE_SESSION_STATE", "").strip()
+SESSION_STATE = Path(SESSION_STATE_ENV).expanduser() if SESSION_STATE_ENV else None
 AGENT_SESSIONS = Path(os.environ.get("OPENCLAW_CLAUDE_SESSIONS_JSON", str(Path.home() / ".openclaw" / "agents" / "claude" / "sessions" / "sessions.json")))
 
 
@@ -71,11 +72,11 @@ def main() -> int:
     else:
         blockers.append("could not identify packaged claude-agent-acp runtime from wrapper")
 
-    session_state = read_json(SESSION_STATE)
+    session_state = read_json(SESSION_STATE) if SESSION_STATE else None
     if session_state:
         evidence.append(f"previous OpenClaw ACP session metadata exists: {SESSION_STATE}")
     else:
-        evidence.append("no previous ACP session metadata found at expected path")
+        evidence.append("no explicit OPENCLAW_CLAUDE_SESSION_STATE metadata path configured")
 
     agent_sessions = read_json(AGENT_SESSIONS)
     if agent_sessions:
@@ -125,7 +126,7 @@ def main() -> int:
         "observed_files": {
             "wrapper": str(WRAPPER) if WRAPPER.exists() else None,
             "installed_bin_from_wrapper": str(installed_bin_path) if installed_bin_path else None,
-            "session_state": str(SESSION_STATE) if SESSION_STATE.exists() else None,
+            "session_state": str(SESSION_STATE) if SESSION_STATE and SESSION_STATE.exists() else None,
             "agent_sessions_index": str(AGENT_SESSIONS) if AGENT_SESSIONS.exists() else None,
         },
         "direct_cli_presence": cli_presence,

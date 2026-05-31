@@ -1,0 +1,10 @@
+{
+  "update_id": 900009,
+  "message": {
+    "message_id": 3009,
+    "chat": {"id": -1009000000001, "type": "supergroup", "title": "openclaw??"},
+    "from": {"id": 100000001, "is_bot": false, "first_name": "Alex"},
+    "date": 1780000009,
+    "text": ""
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "update_id": 900008,
+  "receiver_agent_id": "codex",
+  "receiver_bot_username": "lchcodex_bot",
+  "message": {
+    "message_id": 8008,
+    "from": {
+      "id": 100000001,
+      "is_bot": false,
+      "first_name": "Alex"
+    },
+    "chat": {
+      "id": -1009000000001,
+      "title": "Openclaw进化",
+      "type": "supergroup"
+    },
+    "date": 1779273000,
+    "text": "@lchopenclaw_bot 请把这个作为 bot-to-bot 协作触发",
+    "entities": [
+      {
+        "offset": 0,
+        "length": 16,
+        "type": "mention"
+      }
+    ]
+  }
+}
