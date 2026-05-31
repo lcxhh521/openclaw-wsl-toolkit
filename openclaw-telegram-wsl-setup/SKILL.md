@@ -1,6 +1,6 @@
 ---
 name: openclaw-telegram-wsl-setup
-description: "A safe, transparent, simple OpenClaw guide and WSL toolkit for Windows. Use when the user wants to install, run, repair, monitor, or understand OpenClaw on Windows through WSL2; needs gateway readiness checks, keepalive/autostart, local OpenClaw Monitor panel installation, optional market information immersion module setup, optional translation agent setup for long-document translation and bilingual PDF layout, optional agent collaboration mailbox setup for main↔Codex/external-agent handoff, IMA OpenAPI skill setup for Tencent ima knowledge bases, long-offline network recovery, stale socket or polling recovery after internet loss, Telegram bot setup/repair, safe token entry, proxy-aware connectivity, pairing approval, channel startup verification, or diagnosis of messages that are not received, not answered, delayed, or only work while WSL is awake."
+description: "A safe, transparent, simple OpenClaw guide and WSL toolkit for Windows. Use when the user wants to install, run, repair, monitor, or understand OpenClaw on Windows through WSL2; needs gateway readiness checks, keepalive/autostart, local OpenClaw Monitor panel installation, optional market information immersion module setup, optional translation agent setup for long-document translation and bilingual PDF layout, optional agent collaboration mailbox setup for main↔Codex/external-agent handoff, optional Telegram Agent Room setup for visible group/private multi-agent collaboration, IMA OpenAPI skill setup for Tencent ima knowledge bases, long-offline network recovery, stale socket or polling recovery after internet loss, Telegram bot setup/repair, safe token entry, proxy-aware connectivity, pairing approval, channel startup verification, or diagnosis of messages that are not received, not answered, delayed, or only work while WSL is awake."
 ---
 
 # OpenClaw 养虾指南（WSL Toolkit）
@@ -261,13 +261,14 @@ Codex may be able to infer and run the right install commands from the current e
    - For polished bilingual PDFs, the layout workflow must happen inside translation agent/layout workflow: GLM and MiniMax each produce detailed proposals, GLM/MiniMax/GPT all participate in evaluation/discussion, and the workflow writes `layout_final_brief.md`. Main must not call GPT directly or act as the synthesizing brain.
    - For book/chapter layout, each new chapter starts on a new page.
 
-14. If the user wants main ↔ Codex/external-agent collaboration, offer the optional `agent-collab` module from the repository root.
-   - Treat agent collaboration as opt-in, not base OpenClaw infrastructure and not a default skill install.
-   - Use it only when the user explicitly wants asynchronous multi-agent handoff, for example OpenClaw main coordinating with Codex/Cursor/Claude Code/coding agents through a shared mailbox.
-   - Explain the two-way reminder mechanism: main writes `main_to_codex.md` and sets `turn.json.needs_reply=codex`; the external watcher runs local `CODEX_WAKE_COMMAND`; Codex writes `codex_to_main.md` and sets `needs_reply=main`; the OpenClaw watcher calls `openclaw agent --session-id ...`.
-   - The reliable completion signal is `turn.json` being advanced by the expected writer, not a watcher process merely starting.
-   - Install only after the user confirms. Follow `agent-collab/OPTIONAL_INSTALL.md`: create a mailbox, copy `turn.example.json`, configure the main-side watcher, then configure the external/Codex-side watcher.
-   - Keep watcher intervals low-frequency, e.g. 1-5 minutes; use lock files, per-seq retry cooldown, and max attempts. Do not create high-frequency polling.
+14. If the user wants main ↔ Codex/external-agent collaboration, first distinguish the two public collaboration layers:
+   - `agent-collab/` is the early mailbox v0 for asynchronous main ↔ Codex/external-agent handoff.
+   - `codex-main-bridge/agent-room/` is the newer Telegram Agent Room infrastructure for visible group/private multi-agent collaboration, room-local context, status cards, and durable local artifacts.
+   - Treat both layers as opt-in, not base OpenClaw infrastructure and not a default skill install. Use them only when the user explicitly asks for asynchronous multi-agent handoff, Telegram group rooms, Codex/Claude Code private bots, or visible agent collaboration.
+   - For mailbox v0, explain the two-way reminder mechanism: main writes `main_to_codex.md` and sets `turn.json.needs_reply=codex`; the external watcher runs local `CODEX_WAKE_COMMAND`; Codex writes `codex_to_main.md` and sets `needs_reply=main`; the OpenClaw watcher calls `openclaw agent --session-id ...`. The reliable completion signal is `turn.json` being advanced by the expected writer, not a watcher process merely starting.
+   - For Telegram Agent Room, explain that each Telegram group maps to an independent room context; adding an agent to an existing group adds a participant to that room; mentions control first-response ownership, while all active participants should still see bounded room context and may contribute when useful.
+   - Public repository code must not include real bot tokens, real room bindings, committed offsets, private prompts, raw transcripts, active-runner state, local runtime outputs, or user-specific IDs. Examples and smoke tests must use placeholders.
+   - Install only after the user confirms. Follow `agent-collab/OPTIONAL_INSTALL.md` for mailbox v0. For Agent Room, use `codex-main-bridge/agent-room/telegram_room_runtime_plan.md`, schemas, validators, and smoke tests before enabling live Telegram sends.
    - Do not read secrets, do not delete user files, do not auto-publish Telegram/Notion/GitHub, and do not change quality/model/content prompts as part of installation.
 
 15. If the user wants optional API enhancements, offer Jina embeddings and Tavily web search from `tools/openclaw-optional-apis`.
@@ -956,6 +957,42 @@ systemctl --user status openclaw-market-immersion-morning.timer --no-pager
 ```
 
 If the smoke test cannot query sources because of network, proxy, API, or provider changes, report that plainly and do not claim the scheduled daily report is production-ready.
+
+## Optional Telegram Agent Room Module
+
+Use this section only when the user explicitly wants visible multi-agent collaboration through Telegram groups or private bot chats. This module is separate from the basic OpenClaw Telegram bot and from the older mailbox-only handoff.
+
+Public source lives under:
+
+```text
+codex-main-bridge/agent-room/
+```
+
+Core operating rules:
+
+- A Telegram group maps to one independent room. Creating a new group creates a new room; adding an agent to an existing group adds that agent to the existing room.
+- All active participants should receive bounded room context. `@agent` mentions control first-response ownership, not total visibility.
+- Codex and Claude Code private chats are separate direct rooms, not aliases for the group room.
+- The resident runtime is the primary response path. Timers are watchdogs and recovery drivers, not the normal chat loop.
+- One stuck agent must not block the whole queue. Runner state should move through visible `queued` / `running` / `completed` / `failed` / `stale` states.
+- The pinned status card should be edited in place and scoped only to the current room, not global machine state.
+- Quality, model/provider, prompt, publishing, or final editorial-policy changes must be surfaced to Alex instead of being silently folded into infrastructure work.
+
+Safety boundary:
+
+- Never commit Telegram bot tokens, real room bindings, update offsets, raw hidden prompts, raw transcripts, active-runner outputs, local runtime artifacts, or user-specific IDs.
+- Public examples must use placeholder IDs and placeholder bot names.
+- Live Telegram sends need explicit user approval for the relevant smoke/runtime step.
+- GitHub sync may include infrastructure contracts, schemas, validators, tools, documentation, and sanitized examples; it must not include runtime state.
+
+Minimum validation before live use:
+
+```bash
+python3 codex-main-bridge/agent-room/tools/smoke_pinned_status_card.py
+python3 codex-main-bridge/agent-room/tools/smoke_model_routing_reliability.py
+python3 codex-main-bridge/agent-room/tools/smoke_mainline_governance.py
+python3 codex-main-bridge/agent-room/tools/smoke_runtime_recovery.py
+```
 
 ## Optional Translation Agent Module
 
