@@ -13,6 +13,22 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Get-StableWslExe {
+  $path = Join-Path $env:WINDIR "System32\wsl.exe"
+  if (-not (Test-Path -LiteralPath $path)) {
+    throw "wsl.exe not found at $path"
+  }
+  return $path
+}
+
+function Quote-ProcessArgument {
+  param([string] $Value)
+  if ($Value -notmatch '[\s"]') {
+    return $Value
+  }
+  return '"' + ($Value -replace '"', '\"') + '"'
+}
+
 function Invoke-WslWithUtf8Input {
   param(
     [Parameter(Mandatory = $true)]
@@ -22,22 +38,14 @@ function Invoke-WslWithUtf8Input {
     [string] $InputText
   )
 
-  function Quote-ProcessArgument {
-    param([string] $Value)
-    if ($Value -notmatch '[\s"]') {
-      return $Value
-    }
-    return '"' + ($Value -replace '"', '\"') + '"'
-  }
-
   $argLine = (($Arguments | ForEach-Object { Quote-ProcessArgument $_ }) -join " ")
   $lastStdout = ""
   $lastStderr = ""
   $lastExitCode = 1
 
-  for ($attempt = 1; $attempt -le 3; $attempt++) {
+  for ($attempt = 1; $attempt -le 6; $attempt++) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = (Join-Path $env:WINDIR "System32\wsl.exe")
+    $psi.FileName = Get-StableWslExe
     $psi.Arguments = $argLine
     $psi.UseShellExecute = $false
     $psi.RedirectStandardInput = $true
@@ -73,8 +81,8 @@ function Invoke-WslWithUtf8Input {
 
     $combined = ("$lastStdout`n$lastStderr") -replace "`0", ""
     $looksTransient = $lastExitCode -eq -1 -or $combined -match 'WSL_E_DISTRO_NOT_FOUND|DISTRO_NOT_FOUND|distro.*not.*found|Access is denied|拒绝访问'
-    if ($attempt -lt 3 -and $looksTransient) {
-      Start-Sleep -Seconds (2 * $attempt)
+    if ($attempt -lt 6 -and $looksTransient) {
+      Start-Sleep -Seconds ([Math]::Min(15, 2 * $attempt))
       continue
     }
     break
@@ -88,6 +96,19 @@ function Invoke-WslWithUtf8Input {
     [Console]::Error.Write($lastStderr)
   }
   return $lastExitCode
+}
+
+function Acquire-WslSafeLock {
+  $lockPath = Join-Path $env:TEMP "codex-openclaw-wsl-safe.lock"
+  $deadline = (Get-Date).AddSeconds(90)
+  while ((Get-Date) -lt $deadline) {
+    try {
+      return [System.IO.File]::Open($lockPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    } catch {
+      Start-Sleep -Milliseconds 250
+    }
+  }
+  throw "Timed out waiting for WSL safe runner lock: $lockPath"
 }
 
 if (($CommandText -and $CommandFile) -or (-not $CommandText -and -not $CommandFile)) {
@@ -110,9 +131,11 @@ $CommandText = $CommandText -replace "`r`n", "`n"
 $CommandText = $CommandText -replace "`r", "`n"
 [System.IO.File]::WriteAllText($localPath, $CommandText, $utf8NoBom)
 
+$lockStream = Acquire-WslSafeLock
 $copiedRemote = $false
+$wslExe = Get-StableWslExe
 try {
-  & wsl -d $Distro -- bash -lc "mkdir -p $remoteDir"
+  & $wslExe -d $Distro -- bash -lc "mkdir -p $remoteDir"
   if ($LASTEXITCODE -ne 0) {
     throw "failed to create remote temp dir through wsl.exe"
   }
@@ -127,9 +150,9 @@ $exitCode = 0
 try {
   if ($copiedRemote) {
     if ($Interpreter -eq "python3") {
-      & wsl -d $Distro -- python3 $remotePath
+      & $wslExe -d $Distro -- python3 $remotePath
     } else {
-      & wsl -d $Distro -- bash $remotePath
+      & $wslExe -d $Distro -- bash $remotePath
     }
     $exitCode = $LASTEXITCODE
   } elseif ($Interpreter -eq "python3") {
@@ -141,7 +164,11 @@ try {
 finally {
   Remove-Item -LiteralPath $localPath -Force -ErrorAction SilentlyContinue
   if ($copiedRemote -and -not $KeepRemote) {
-    & wsl -d $Distro -- rm -f $remotePath 2>$null
+    & $wslExe -d $Distro -- rm -f $remotePath 2>$null
+  }
+  if ($lockStream) {
+    $lockStream.Close()
+    $lockStream.Dispose()
   }
 }
 

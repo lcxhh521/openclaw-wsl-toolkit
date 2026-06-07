@@ -53,7 +53,7 @@ Windows
 
 ## 它能做什么
 
-这套东西主要分成八块。
+这套东西主要分成十块。
 
 第一块是安装和修复。它会优先按 Windows + WSL2 + Ubuntu 的路线处理 OpenClaw，先把 gateway、systemd user service、模型回复和权限范围确认好，再接 Telegram。
 
@@ -71,7 +71,11 @@ Windows
 
 第七块是 agent 协作选装模块。它分成两层：`agent-collab/` 是早期 main ↔ Codex mailbox v0，适合低频异步架构讨论；`codex-main-bridge/agent-room/` 是后续沉淀的 Telegram Agent Room，面向群聊前台、私聊 bot、@ 指令、可编辑置顶状态卡、runner 隔离、协作 ledger、主线推进和模型额度/路由可靠性。它们都不是基础安装必需项，只有用户明确需要 OpenClaw main 与 Codex/Claude Code/Antigravity 等外部 agent 协作时才安装。
 
-第八块是可选增强。比如 Jina embeddings、Tavily web search、豆包/火山录音文件识别。这些不是基础安装必需项，只有真的需要语义记忆、联网检索或本地音频处理时再加。
+第八块是 Windows/WSL 安全执行工具。它把“从 Codex Desktop 调 WSL 时偶发看不到 Ubuntu、复杂命令乱码、管道/引号/重定向被 PowerShell 搅乱”当成已知工程问题处理：短健康检查走 `Invoke-StableWsl.ps1`，多行 Bash/Python 和 Unicode 脚本走 `Invoke-WslSafe.ps1`，需要释放 C 盘时可以用 `Move-WslDistroToDataDrive.ps1` 把整个 WSL 发行版迁到数据盘。
+
+第九块是 Agent Room 协作运行态保留机制。多 agent 协作会持续产生 daemon/resident/finished runner 快照，这些快照对最近排障有用，但不能无限保存到把 WSL VHDX 和 C 盘撑爆。`tools/agent-room` 里的 retention prune 只清理可再生运行快照，保留 task、ledger、room、config、tools，并在删除 runner 结果前检查终态证据。
+
+第十块是可选增强。比如 Jina embeddings、Tavily web search、豆包/火山录音文件识别。这些不是基础安装必需项，只有真的需要语义记忆、联网检索或本地音频处理时再加。
 
 另外，它会特别注意几件容易出事故的事：不要把 token 发到聊天里，不要把 key 写进仓库，不要随便重置配置，不要把“机器人没回”直接等同于“Telegram token 坏了”。
 
@@ -137,6 +141,7 @@ Windows
         |   |-- Invoke-StableWsl.ps1
         |   |-- Invoke-WslSafe.ps1
         |   |-- Invoke-WslScript.ps1
+        |   |-- Move-WslDistroToDataDrive.ps1
         |   |-- Start-WslKeepalive.ps1
         |   |-- WslUtf8Bridge.ps1
         |   `-- README.md
@@ -154,6 +159,12 @@ Windows
         |   |-- repair-openclaw-memory-deep-status.py
         |   |-- Verify-JinaKey.py
         |   `-- Verify-TavilyKey.py
+        |-- agent-room/
+        |   |-- agent_room_retention_prune.py
+        |   |-- Install-AgentRoomRetentionPrune.ps1
+        |   |-- openclaw-agent-room-retention-prune.service
+        |   |-- openclaw-agent-room-retention-prune.timer
+        |   `-- README.md
         `-- translation-agent/
             |-- translation_handoff.py
             `-- translation_artifact_gate.py
@@ -201,6 +212,7 @@ Use $openclaw-telegram-wsl-setup to follow the OpenClaw 养虾指南 on Windows 
 - `WslUtf8Bridge.ps1`：通过 stdin 把 UTF-8 内容写入 WSL，避开 `\\wsl.localhost` 拷贝失败。
 - `Invoke-WslScript.ps1`：用上面的桥把本地脚本投递到 WSL 后执行。
 - `Start-WslKeepalive.ps1`：隐藏启动一个 WSL keepalive，减少冷启动/休眠后的抖动。
+- `Move-WslDistroToDataDrive.ps1`：用 `wsl --manage <distro> --move <target>` 把整个 WSL 发行版迁到数据盘，适合 OpenClaw 工作区/VHDX 压迫 C 盘时使用。
 
 这些脚本属于本机可靠性基础设施，不改变 OpenClaw 内容生成、模型、prompt 或发布逻辑。
 
@@ -275,6 +287,33 @@ OpenClaw 冷启动时，面板会先做轻量探测，先看 gateway 和 Telegra
 开启后，控制中心会通过 Clash Verge Rev 暴露的本地 Mihomo 管道把核心维持在规则模式，让 OpenClaw/Codex 命中 `GLOBAL` 代理组，国内流量继续按规则直连。换节点时只需要在 Clash Verge 的 `GLOBAL` 组里选择节点；这个功能不绑定某个国家或具体节点。
 
 如果没有开全局/TUN，或者国内应用本来就正常，通常不用开启这个选项。
+
+## Agent Room 运行态保留
+
+多 agent 协作系统会产生大量短生命周期产物，例如 daemon ticks、resident runner 目录和 finished runner 快照。它们用于最近排障，但不是长期上下文。长期上下文应沉淀到 room message、task manifest、collaboration ledger、RCA/decision 文档，而不是无限保留每个 tick 的 stdout/result。
+
+仓库附带：
+
+```text
+openclaw-telegram-wsl-setup/tools/agent-room/
+```
+
+它提供 `agent_room_retention_prune.py` 和一个可选 systemd user timer。默认策略：
+
+- `collaboration-ledgers/`、`tasks/`、`tasks.jsonl`、`rooms/`、`config/`、`tools/` 永不删除。
+- `daemon-runs/` 只保留最近短窗口和少量最新 run/tick。
+- `resident-runs/` 默认保留 48 小时。
+- `finished-runners/` 默认保留 7 天。
+- 含有 `result.json` 的 runner 目录必须先在 task manifest 或 canonical ledger 中出现终态证据，否则只标记 `retention_wait`，不删除。
+
+安装：
+
+```powershell
+cd .\openclaw-telegram-wsl-setup\tools\agent-room
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-AgentRoomRetentionPrune.ps1 -Distro Ubuntu
+```
+
+这个 timer 只做本地文件 retention；不发 Telegram、不调模型、不发布 Notion、不推 GitHub，也不调用 gateway RPC。
 
 ## 市场信息浸泡模块
 

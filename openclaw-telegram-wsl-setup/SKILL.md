@@ -174,6 +174,7 @@ For each user-required action, provide:
 Codex may be able to infer and run the right install commands from the current environment, but the skill should not rely on memory alone. For Node/npm, OpenClaw install, and gateway service setup:
 
 - First inspect the current state with narrow commands.
+- When running from Codex Desktop on Windows, prefer the bundled `tools/wsl-safe/Invoke-StableWsl.ps1` for WSL health checks and `tools/wsl-safe/Invoke-WslSafe.ps1` for multiline Bash/Python, Unicode text, pipes, quotes, `$`, `&`, `||`, or redirection. Do not treat a bare-shell `WSL_E_DISTRO_NOT_FOUND` as conclusive until a System32 `wsl.exe` probe has also failed.
 - Prefer the installed OpenClaw CLI help, `openclaw doctor`, and `openclaw doctor --fix` when available.
 - If OpenClaw is not installed, use the current recommended package path for the environment; ask before networked installs or updates.
 - Do not hard-code stale commands when the local CLI can reveal the current command shape.
@@ -285,6 +286,13 @@ Codex may be able to infer and run the right install commands from the current e
    - Doubao text models can analyze transcripts; Ark chat models should not be described as native local-audio listeners unless the current provider docs prove that exact audio path works.
    - The Volcengine recording-file ASR path needs a speech resource in addition to the general API key. Flash mode normally uses `volc.bigasr.auc_turbo`; standard mode normally uses `volc.seedasr.auc`.
    - Store keys only through a local terminal prompt or existing `~/.openclaw/secrets/volcengine.env`; never ask the user to paste keys into chat.
+
+15. If Agent Room / multi-agent collaboration is enabled, install or verify runtime retention before leaving it to run unattended.
+   - Use `tools/agent-room/Install-AgentRoomRetentionPrune.ps1` to install the optional hourly WSL timer.
+   - The retention tool may delete only regenerated runtime snapshots under `daemon-runs/`, `resident-runs/`, and `finished-runners/`.
+   - It must never delete canonical state: `collaboration-ledgers/`, `tasks/`, `tasks.jsonl`, `rooms/`, `config/`, or `tools/`.
+   - It must use the evidence gate for runner results: if a runner directory contains `result.json`, retain it until a task manifest or canonical ledger proves the result reached a terminal state.
+   - Explain that this timer does not send Telegram messages, call model providers, call gateway RPC, publish Notion, push GitHub, or advance tasks. It only prevents low-value snapshots from filling the WSL VHDX/C drive.
    - The helper may run `openclaw-doubao-asr --self-check` without uploading audio.
    - Before transcribing a real local audio file, confirm with the user that the selected audio will be uploaded to Volcengine.
 

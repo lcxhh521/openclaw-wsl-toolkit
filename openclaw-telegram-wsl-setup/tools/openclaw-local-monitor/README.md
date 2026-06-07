@@ -65,13 +65,28 @@ The panel updates its display automatically as a lightweight vital-sign view. Th
 
 Hover hints should stay within the app window rather than using native tooltips that can spill outside the interface.
 
-The main panel intentionally does not run periodic gateway RPC refresh. It refreshes when the window opens and after explicit power actions; deeper troubleshooting belongs behind the `诊断` button. This avoids a background window, minimized taskbar entry, or tray process competing with Telegram for the gateway event loop. The main panel does not expand `tasks list`, `sessions.list`, `logs.tail`, `tasks audit`, `tasks show`, TaskFlow, token snapshots, or monthly cost scans.
+The main panel intentionally does not run periodic gateway RPC refresh. It refreshes when the window opens and after explicit power actions; deeper troubleshooting belongs behind the `诊断` button. This avoids a background window, minimized taskbar entry, or tray process competing with Telegram for the gateway event loop. The main panel does not call `openclaw gateway status`, `openclaw gateway probe`, `openclaw channels status`, `tasks list`, `sessions.list`, `logs.tail`, `tasks audit`, `tasks show`, TaskFlow, token snapshots, or monthly cost scans.
+
+The main panel is a local-facts dashboard:
+
+- Local service: reads `systemctl --user is-active openclaw-gateway.service`, the gateway process, and whether port `18789` is listening.
+- Telegram: the main panel no longer has a Telegram status card because passive local logs cannot reliably answer whether the Telegram entry is usable now. Telegram evidence belongs in diagnostics and reliability reminders.
+- Background work: reads local `tasks/<task_id>/task.json` records through `scripts/task_record.py list`; it does not use OpenClaw task audit/show.
+- Agent activity: reads `~/.openclaw/openclaw.json` and each agent's local `sessions/sessions.json` to show one latest local activity record per agent. It does not infer that an agent is actively doing a named task unless a local task/manifest/session record proves it.
+- Token/cost: reads `~/.openclaw/monitor-cache/usage-summary.json`.
+- Reliability reminders: reads `~/.openclaw/monitor-cache/reliability-status.json`.
+
+This means the headline answers only whether the local OpenClaw service appears alive and reachable from local facts. A recent Telegram delivery failure is shown on the Telegram card or in reminders, but it does not by itself mark the whole app unavailable.
+
+The Gateway card's percentage is the gateway process CPU from `ps`, not startup progress or availability percentage. The Telegram card is local-log observation only: `最近已回复` means a recent `sendMessage ok` was found, `上次...` means the last success is older than the recent window, and `未观测` means the panel did not find a local Telegram signal. `未观测` does not mean Telegram is broken; use diagnostics when an active end-to-end check is needed.
+
+The main hero answers one operational question first: whether the local OpenClaw core appears usable right now. Telegram/channel availability is shown as its own card and diagnostics evidence, not as a reason to mark the entire app unavailable. Use `可用` when the local gateway is confirmed, even if Telegram/channel status is still unconfirmed. Use `运行中` when the OpenClaw service is alive but the lightweight probe times out. Use `不可用` only when the gateway/service is not reachable. Reliability observer events, including recent Telegram/API/provider failures, are reminders and diagnostics evidence. They must never override the headline by themselves; if Telegram is currently working, old or recent request failures belong only in reminders/diagnostics.
 
 The old manual recheck path has been removed from the main panel. Use `诊断` for architecture-level read-only troubleshooting, or `原生 Control` for the browser control surface. Starting/stopping OpenClaw remains an explicit power action.
 
-During OpenClaw cold startup, the panel uses a lightweight startup probe first: gateway probe plus Telegram channel status. It skips heavier task, audit, log, token, cost, session, and workspace-artifact reads until the startup progress reaches ready. This keeps the control center from adding pressure while OpenClaw is still bringing up channels and sidecars.
+During OpenClaw cold startup, the panel uses lightweight local facts first: systemd service state, process existence, listening port, local logs, task records, and cache files. Gateway RPC and channel RPC belong behind the `诊断` button. The main panel separates local gateway health from external Telegram/API/provider failures so a network timeout is not shown as evidence that gateway restarted.
 
-Startup and control actions must not depend on a login-shell `PATH`. The monitor and `Start-OpenClaw.ps1` should prefer `/home/lcxhh/.local/bin/openclaw`, falling back to `command -v openclaw` only when that absolute path is unavailable. This prevents non-login WSL launch contexts from reporting `openclaw: command not found` while the gateway is otherwise healthy.
+Startup and control actions must not depend on a login-shell `PATH`. The monitor and `Start-OpenClaw.ps1` should prefer `$HOME/.local/bin/openclaw`, falling back to `command -v openclaw` only when that user-local path is unavailable. This prevents non-login WSL launch contexts from reporting `openclaw: command not found` while the gateway is otherwise healthy.
 
 Telegram status is intentionally split: gateway reachable, Telegram configured/running/connected, inbound seen, outbound/reply completed, and entrance pressure/event-loop degraded are separate signals. Do not collapse them into a single “Telegram 正常” label; “connected” only proves transport state, not that Alex has received a fresh reply.
 

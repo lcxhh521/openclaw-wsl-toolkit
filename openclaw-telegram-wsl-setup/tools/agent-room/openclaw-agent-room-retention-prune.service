@@ -1,0 +1,6 @@
+[Unit]
+Description=OpenClaw Agent Room retention prune
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.openclaw/workspace/codex-main-bridge/agent-room/tools/agent_room_retention_prune.py --apply

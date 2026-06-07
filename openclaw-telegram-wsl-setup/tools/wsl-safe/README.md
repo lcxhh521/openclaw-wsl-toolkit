@@ -2,13 +2,14 @@
 
 `Invoke-WslSafe.ps1` is a small Windows-side helper for running Bash or Python snippets inside Ubuntu on WSL without letting PowerShell quoting, CRLF line endings, or UTF-8 BOMs corrupt the script.
 
-Use it when a workflow needs to pass multi-line scripts from Windows/Codex into WSL, especially for OpenClaw maintenance, status checks, or repository sync work.
+Use it when a workflow needs to pass multi-line scripts from Windows/Codex into WSL, especially for OpenClaw maintenance, status checks, repository sync work, and Unicode-heavy diagnostics.
 
-It does three things deliberately:
+It does four things deliberately:
 
 1. Accepts exactly one of `-CommandText` or `-CommandFile`.
 2. Normalizes CRLF/CR to LF and writes UTF-8 without BOM.
-3. Copies the temporary script into `\\wsl.localhost\<Distro>\tmp\codex_wsl_safe\` and executes it with the selected interpreter.
+3. Uses `C:\Windows\System32\wsl.exe` and retries transient WSL visibility failures.
+4. Copies the temporary script into `\\wsl.localhost\<Distro>\tmp\codex_wsl_safe\`, falling back to UTF-8 stdin when UNC copying is unavailable.
 
 Example:
 
@@ -19,8 +20,6 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\OpenC
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\OpenClawWslTools\Invoke-WslSafe.ps1" -Interpreter python3 -CommandText 'print("hello from WSL")'
 ```
-
-Safety notes:
 
 ## Stable WSL Compatibility Helpers
 
@@ -42,7 +41,20 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\OpenC
 
 The generated `stable-wsl-state.json` is local runtime state and should not be committed.
 
-- The helper does not store secrets.
-- It removes the temporary local and WSL files by default.
+## Move a WSL Distro to a Data Drive
+
+When the OpenClaw workspace/VHDX is pressuring C:, move the whole distro instead of copying runtime folders by hand:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Move-WslDistroToDataDrive.ps1 -Distro Ubuntu -TargetRoot E:\WSL -WhatIf
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Move-WslDistroToDataDrive.ps1 -Distro Ubuntu -TargetRoot E:\WSL
+```
+
+The script uses `wsl --manage <distro> --move <target>`, then verifies the moved distro. It does not copy secrets, edit OpenClaw config, or touch Telegram/model credentials.
+
+## Safety Notes
+
+- The helpers do not store secrets.
+- Temporary local and WSL files are removed by default.
 - Use `-KeepRemote` only for debugging.
 - Keep destructive commands out of generated scripts unless the user explicitly approved them.

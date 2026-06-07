@@ -196,6 +196,18 @@ namespace OpenClawLocalMonitor
         public bool UsageCacheVisible;
         public bool UsageCacheStale;
         public string UsageCacheAge = "-";
+        public bool ModelQuotaVisible;
+        public bool ModelQuotaStale;
+        public string TokenChannelQuotaText = "-";
+        public string TokenChannelQuotaState = "warn";
+        public string CodexQuotaText = "-";
+        public string CodexQuotaState = "warn";
+        public string MainQuotaText = "-";
+        public string MainQuotaState = "warn";
+        public string ClaudeQuotaText = "-";
+        public string ClaudeQuotaState = "warn";
+        public string ArkQuotaText = "-";
+        public string ArkQuotaState = "warn";
         public long LastSessionAgeMs = -1;
         public string LastSessionSource = "-";
         public string LastSessionModel = "-";
@@ -210,6 +222,7 @@ namespace OpenClawLocalMonitor
         public string CollabStatus = "";
         public readonly List<string> Logs = new List<string>();
         public readonly List<string> TokenFlows = new List<string>();
+        public readonly List<string> ModelQuotaLines = new List<string>();
     }
 
     sealed class LocalGatewayFacts
@@ -298,6 +311,26 @@ namespace OpenClawLocalMonitor
         public readonly List<string> Lines = new List<string>();
     }
 
+    sealed class ModelQuotaSummary
+    {
+        public bool Available;
+        public bool Stale;
+        public string Error = "";
+        public string GeneratedAt = "";
+        public long AgeMs = -1;
+        public string ChannelText = "-";
+        public string ChannelState = "warn";
+        public string CodexText = "-";
+        public string CodexState = "warn";
+        public string MainText = "-";
+        public string MainState = "warn";
+        public string ClaudeText = "-";
+        public string ClaudeState = "warn";
+        public string ArkText = "-";
+        public string ArkState = "warn";
+        public readonly List<string> Lines = new List<string>();
+    }
+
     sealed class ReliabilitySummary
     {
         public bool Available;
@@ -314,11 +347,12 @@ namespace OpenClawLocalMonitor
     sealed class MonitorForm : Form
     {
         const string WslDistro = "Ubuntu";
-        const string OpenClawAbsolutePath = "/home/lcxhh/.local/bin/openclaw";
         static readonly bool MainPanelAutoRefreshEnabled = false;
         const int AutoRefreshIntervalMs = 120000;
+        const int TokenChannelRefreshIntervalMs = 30000;
         readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 100 };
         readonly Timer timer = new Timer();
+        readonly Timer tokenChannelTimer = new Timer();
         readonly Timer clashTimer = new Timer();
         readonly object costLock = new object();
         readonly object artifactLock = new object();
@@ -330,6 +364,7 @@ namespace OpenClawLocalMonitor
         bool tokenSectionVisible;
         bool artifactBaselineReady;
         bool refreshing;
+        bool tokenChannelRefreshing;
         bool enforcingClashMode;
         int gatewayProbeFailures;
         ClosePreference closePreference = ClosePreference.Ask;
@@ -359,6 +394,10 @@ namespace OpenClawLocalMonitor
         Card tokenOutput;
         Card tokenCache;
         Card tokenCost;
+        Card quotaCodex;
+        Card quotaMain;
+        Card quotaClaude;
+        Card quotaArk;
         RoundedPanel costHintPopup;
         Label heroTitle;
         Label heroDetail;
@@ -416,6 +455,9 @@ namespace OpenClawLocalMonitor
                 };
                 timer.Start();
             }
+            tokenChannelTimer.Interval = TokenChannelRefreshIntervalMs;
+            tokenChannelTimer.Tick += async (s, e) => await RefreshTokenChannelCardsAsync();
+            tokenChannelTimer.Start();
             clashTimer.Interval = 2500;
             clashTimer.Tick += async (s, e) => await EnsureClashSafeModeAsync(false);
             clashTimer.Start();
@@ -839,7 +881,7 @@ namespace OpenClawLocalMonitor
             AddCardHoverTip(gateway, "这里显示 gateway 进程 CPU。数值高会变慢，但不等于重启或不可用。");
             AddCardHoverTip(tasks, "来自本地 task.json，统计未结束任务；不调用 gateway。");
 
-            tokenHeader = MakeLabel("Token / 成本流向", 28, 344, 260, 24, 12f, Color.FromArgb(15, 23, 42), true);
+            tokenHeader = MakeLabel("Token / 成本 / 额度通道", 28, 344, 320, 24, 12f, Color.FromArgb(15, 23, 42), true);
             tokenHeader.Visible = false;
             Controls.Add(tokenHeader);
             tokenTotal = new Card("今日 Token", 28, 376, 142, 84);
@@ -847,8 +889,14 @@ namespace OpenClawLocalMonitor
             tokenOutput = new Card("输出 Token", 340, 376, 142, 84);
             tokenCache = new Card("缓存读取", 496, 376, 142, 84);
             tokenCost = new Card("已记录成本", 652, 376, 128, 84);
-            Controls.AddRange(new Control[] { tokenTotal.Panel, tokenInput.Panel, tokenOutput.Panel, tokenCache.Panel, tokenCost.Panel });
-            foreach (var card in new[] { tokenTotal, tokenInput, tokenOutput, tokenCache, tokenCost })
+            quotaMain = new Card("额度通道", 28, 472, 610, 96);
+            quotaMain.Value.Font = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold);
+            quotaMain.Value.TextAlign = ContentAlignment.TopLeft;
+            quotaCodex = new Card("Codex GPT额度", 184, 472, 142, 84);
+            quotaClaude = new Card("Claude Code", 340, 472, 142, 84);
+            quotaArk = new Card("Ark Coding", 496, 472, 142, 84);
+            Controls.AddRange(new Control[] { tokenTotal.Panel, tokenInput.Panel, tokenOutput.Panel, tokenCache.Panel, tokenCost.Panel, quotaMain.Panel, quotaCodex.Panel, quotaClaude.Panel, quotaArk.Panel });
+            foreach (var card in new[] { tokenTotal, tokenInput, tokenOutput, tokenCache, tokenCost, quotaMain, quotaCodex, quotaClaude, quotaArk })
                 card.Panel.Visible = false;
             AddCostHint();
 
@@ -1051,10 +1099,18 @@ namespace OpenClawLocalMonitor
                         tokenCards[i].SetBounds(margin + col * (tokenCardWidth + gap), tokenY + row * 96, tokenCardWidth, 84);
                     }
                     y = tokenY + ((tokenCards.Length + tokenColumns - 1) / tokenColumns) * 96 + 10;
+                    quotaMain.Panel.Visible = true;
+                    quotaMain.SetBounds(margin, y, contentWidth, 104);
+                    foreach (var card in new[] { quotaCodex, quotaClaude, quotaArk })
+                    {
+                        card.Panel.Visible = false;
+                        card.SetBounds(margin, y, 1, 1);
+                    }
+                    y += 114;
                 }
                 else
                 {
-                    foreach (var card in new[] { tokenTotal, tokenInput, tokenOutput, tokenCache, tokenCost })
+                    foreach (var card in new[] { tokenTotal, tokenInput, tokenOutput, tokenCache, tokenCost, quotaMain, quotaCodex, quotaClaude, quotaArk })
                     {
                         card.Panel.Visible = false;
                         card.SetBounds(margin, y, 1, 1);
@@ -1173,6 +1229,35 @@ namespace OpenClawLocalMonitor
                 refreshing = false;
                 UpdateOpenClawPowerUi();
             }
+        }
+
+        async Task RefreshTokenChannelCardsAsync()
+        {
+            if (!Visible || WindowState == FormWindowState.Minimized) return;
+            if (refreshing || tokenChannelRefreshing) return;
+            tokenChannelRefreshing = true;
+            try
+            {
+                var snapshot = await Task.Run(() => BuildTokenChannelSnapshot());
+                RenderTokenChannelSnapshot(snapshot);
+            }
+            catch
+            {
+                // Quota refresh is intentionally best-effort: it must never make the
+                // control center feel broken or put pressure on OpenClaw itself.
+            }
+            finally
+            {
+                tokenChannelRefreshing = false;
+            }
+        }
+
+        Snapshot BuildTokenChannelSnapshot()
+        {
+            var snapshot = new Snapshot();
+            FillUsageCacheSnapshot(snapshot);
+            FillModelQuotaSnapshot(snapshot);
+            return snapshot;
         }
 
         async Task RefreshDiagnosticsAsync()
@@ -1492,12 +1577,20 @@ namespace OpenClawLocalMonitor
                     var connected = ToBool(Get(source, "connected"));
                     var lastInboundAt = ToLong(Get(source, "lastInboundAt"));
                     var lastOutboundAt = ToLong(Get(source, "lastOutboundAt"));
+                    var lastError = Convert.ToString(Get(source, "lastError") ?? "");
                     var inboundSeen = lastInboundAt > 0;
                     var outboundSeen = lastOutboundAt > 0;
                     var ok = configured && running && connected;
                     var channelValue = !configured ? "未配置" : !running ? "未运行" : !connected ? "未连接" : outboundSeen ? "已回复" : inboundSeen ? "已收未回证" : "已连接未验证";
                     var channelState = ok ? (outboundSeen ? "Good" : "Warn") : "Risk";
                     d.Telegram.Add(new DiagnosticItem("Channel", channelValue, channelState, "configured=" + configured + ", running=" + running + ", connected=" + connected + ", inboundSeen=" + inboundSeen + ", outboundSeen=" + outboundSeen, "channels status --json"));
+
+                    d.Telegram.Add(new DiagnosticItem(
+                        "Inbound seen",
+                        inboundSeen ? AgeSince(lastInboundAt) + "前" : "未记录",
+                        inboundSeen ? "Good" : "Warn",
+                        inboundSeen ? "channels status 记录到最近入站消息" : "channels status 未返回最近入站时间",
+                        "channels status --json"));
 
                     var eventLoop = AsDict(Get(data, "eventLoop"));
                     if (eventLoop.Count > 0)
@@ -1507,6 +1600,36 @@ namespace OpenClawLocalMonitor
                         var utilization = Convert.ToString(Get(eventLoop, "utilization") ?? "-");
                         var cpuCoreRatio = Convert.ToString(Get(eventLoop, "cpuCoreRatio") ?? "-");
                         d.Telegram.Add(new DiagnosticItem("Entrance pressure", degraded ? "在线但可能慢" : "正常", degraded ? "Warn" : "Good", "eventLoop.degraded=" + degraded + ", reasons=" + reasons + ", utilization=" + utilization + ", cpuCoreRatio=" + cpuCoreRatio, "channels status --json eventLoop"));
+                    }
+
+                    var localSignal = ReadTelegramLocalSignal();
+                    var journalOkRecent = localSignal.LastOkAgeMs >= 0 && localSignal.LastOkAgeMs <= 2L * 60L * 60L * 1000L;
+                    if (lastOutboundAt > 0)
+                    {
+                        d.Telegram.Add(new DiagnosticItem(
+                            "Outbound evidence",
+                            AgeSince(lastOutboundAt) + "前",
+                            "Good",
+                            "channels status 记录到最近出站时间",
+                            "channels status --json"));
+                    }
+                    else if (journalOkRecent)
+                    {
+                        d.Telegram.Add(new DiagnosticItem(
+                            "Outbound evidence",
+                            "journal 已确认",
+                            "Warn",
+                            "status accounting gap：lastOutboundAt 为空，但本地日志有近期 sendMessage ok（" + Age(localSignal.LastOkAgeMs) + "前）",
+                            "local log fallback"));
+                    }
+                    else
+                    {
+                        d.Telegram.Add(new DiagnosticItem(
+                            "Outbound evidence",
+                            "未确认",
+                            string.IsNullOrWhiteSpace(lastError) ? "Warn" : "Risk",
+                            string.IsNullOrWhiteSpace(lastError) ? "lastOutboundAt 为空且本地日志未见近期 sendMessage ok；不等于投递失败，需要结合 pressure/session 看" : "channels status lastError=" + RedactSensitive(lastError),
+                            "channels status + local log"));
                     }
                 }
                 else
@@ -1636,6 +1759,7 @@ namespace OpenClawLocalMonitor
                 var fetchCount = CountMatches(text, @"fetch timeout|sync failed|TypeError: fetch failed");
                 var telegramOkCount = CountMatches(text, @"\[telegram\] sendMessage ok|message\.processed.*channel=telegram");
                 var telegramErrorCount = CountMatches(text, @"\[telegram\].*(failed|error|timeout)|sendMessage failed");
+                var contextOverflowCount = CountMatches(text, @"context-overflow|Context overflow|estimated context size exceeds safe threshold");
 
                 var loopState = severeLoopCount > 0 ? "Risk" : livenessCount > 0 ? "Warn" : "Good";
                 d.EntrancePressure.Add(new DiagnosticItem(
@@ -1667,10 +1791,17 @@ namespace OpenClawLocalMonitor
                     telegramErrorCount > 0 ? "存在 Telegram 发送失败/超时日志" : telegramOkCount > 0 ? "最近有 Telegram sendMessage/message.processed 成功记录" : "没有近期发送记录不等于异常，可能只是没有回复输出",
                     "journalctl 30m"));
 
-                var lastPressure = LastMatchingLine(text, @"liveness warning|memory-core|dreaming|session file locked|cleanup timed out|fetch timeout|sync failed|\[telegram\]");
+                d.EntrancePressure.Add(new DiagnosticItem(
+                    "Session pressure",
+                    contextOverflowCount == 0 ? "未见 context overflow" : contextOverflowCount + " context overflow",
+                    contextOverflowCount > 0 ? "Risk" : "Good",
+                    contextOverflowCount > 0 ? "Telegram 传输可能正常，但前台 session 上下文/工具循环压力会导致慢、卡或失败" : "最近未见 direct Telegram session context overflow",
+                    "journalctl 30m"));
+
+                var lastPressure = LastMatchingLine(text, @"context-overflow|Context overflow|estimated context size exceeds safe threshold|liveness warning|memory-core|dreaming|session file locked|cleanup timed out|fetch timeout|sync failed|\[telegram\]");
                 if (!string.IsNullOrWhiteSpace(lastPressure))
                 {
-                    d.EntrancePressure.Add(new DiagnosticItem("Latest signal", Trim(lastPressure, 220), severeLoopCount > 0 || memoryFailureCount > 0 || telegramErrorCount > 0 ? "Warn" : "Good", "最近一条入口相关信号", "journalctl 30m"));
+                    d.EntrancePressure.Add(new DiagnosticItem("Latest signal", Trim(lastPressure, 220), severeLoopCount > 0 || memoryFailureCount > 0 || telegramErrorCount > 0 || contextOverflowCount > 0 ? "Warn" : "Good", "最近一条入口相关信号", "journalctl 30m"));
                 }
             }
             catch (Exception ex)
@@ -1882,7 +2013,7 @@ namespace OpenClawLocalMonitor
         {
             var script =
                 "journalctl --user -u openclaw-gateway.service --since '30 minutes ago' --no-pager -o short-iso 2>/dev/null | " +
-                "grep -iE 'telegram|memory-core|dreaming|session file locked|cleanup timed out|agent cleanup timed out|fetch timeout|sync failed|liveness warning|event_loop|message\\.processed' | tail -120";
+                "grep -iE 'telegram|context-overflow|context overflow|estimated context size exceeds safe threshold|memory-core|dreaming|session file locked|cleanup timed out|agent cleanup timed out|fetch timeout|sync failed|liveness warning|event_loop|message\\.processed' | tail -120";
             var result = RunProcess("wsl.exe", new[] { "-d", WslDistro, "--", "bash", "-lc", script }, 5000);
             if (!result.Ok && string.IsNullOrWhiteSpace(result.Stdout)) return Tuple.Create(true, "", "");
             return Tuple.Create(result.Ok, result.Stdout, result.Stderr + result.Error);
@@ -2077,7 +2208,7 @@ namespace OpenClawLocalMonitor
         CommandResult StartOpenClawGateway()
         {
             var script = OpenClawBootstrapScript() +
-                "systemctl --user start openclaw-gateway.service >/dev/null 2>&1 || true\n" +
+                "systemctl --user start windows-proxy-bridge.service openclaw-gateway.service >/dev/null 2>&1 || true\n" +
                 "pgrep -af 'openclaw-manual-keepalive' >/dev/null 2>&1 || (nohup bash -lc 'exec -a openclaw-manual-keepalive sleep infinity' >/dev/null 2>&1 &)\n" +
                 "for i in $(seq 1 45); do \"$OPENCLAW_BIN\" gateway probe >/dev/null 2>&1 && exit 0; sleep 1; done\n" +
                 "exit 1";
@@ -2255,11 +2386,13 @@ namespace OpenClawLocalMonitor
             var snapshot = new Snapshot();
             SetStartupProgress(snapshot, 100, "本地事实快照", "主面板只读 systemd、进程、端口、缓存和 task record。");
             FillLocalGatewayFacts(snapshot);
+            FillTelegramLocalSignal(snapshot);
             FillTaskRecordsSnapshot(snapshot);
             FillAgentEvidenceSnapshot(snapshot);
             snapshot.CollabStatus = ReadAgentRoomCollabStatus();
             FinalizeMainPanelConnectivityState(snapshot);
             FillUsageCacheSnapshot(snapshot);
+            FillModelQuotaSnapshot(snapshot);
             FillReliabilitySnapshot(snapshot);
 
             if (snapshot.Tasks.Count == 0)
@@ -3037,6 +3170,7 @@ namespace OpenClawLocalMonitor
                 s.TokenFlows.Add(string.IsNullOrWhiteSpace(cache.Error)
                     ? "Token/成本 · 暂无离线缓存；控制中心没有向 gateway 发起重查询。"
                     : "Token/成本 · 缓存读取失败：" + Trim(cache.Error, 100));
+                s.TokenContext = "缓存失效";
                 s.CostText = "暂无缓存";
                 s.CostState = "warn";
                 return;
@@ -3058,6 +3192,16 @@ namespace OpenClawLocalMonitor
             }
             s.CostText = cache.HasEstimatedCost ? FormatUsd(cache.EstimatedCost) : "未记录";
             s.CostState = cache.Stale ? "warn" : cache.HasEstimatedCost && cache.EstimatedCost > 0 ? "work" : "good";
+            if (cache.Stale)
+            {
+                s.TokenContext = "缓存过期";
+                s.TokenInput = 0;
+                s.TokenOutput = 0;
+                s.TokenCacheRead = 0;
+                s.TokenTotal = 0;
+                s.CostText = "缓存过期";
+                s.CostState = "warn";
+            }
 
             s.TokenFlows.Clear();
             s.TokenFlows.Add("缓存 · " + (cache.Stale ? "数据较旧" : "已更新") + " · " + (cache.AgeMs >= 0 ? Age(cache.AgeMs) + "前" : cache.GeneratedAt) + " · 控制中心未查询 gateway");
@@ -3070,6 +3214,39 @@ namespace OpenClawLocalMonitor
                 s.StatusLine += " | Token/成本缓存较旧";
             else if (cache.Stale)
                 s.StatusLine = "Token/成本缓存较旧；控制中心仍保持只读缓存模式。";
+        }
+
+        void FillModelQuotaSnapshot(Snapshot s)
+        {
+            var quota = ReadModelQuotaSummary();
+            if (!quota.Available)
+            {
+                s.ModelQuotaLines.Add(string.IsNullOrWhiteSpace(quota.Error)
+                    ? "模型额度 · 暂无可信额度缓存。"
+                    : "模型额度 · 读取失败：" + Trim(quota.Error, 100));
+                return;
+            }
+
+            s.ModelQuotaVisible = true;
+            s.ModelQuotaStale = quota.Stale;
+            s.TokenChannelQuotaText = quota.ChannelText;
+            s.TokenChannelQuotaState = quota.ChannelState;
+            s.MainQuotaText = quota.MainText;
+            s.MainQuotaState = quota.MainState;
+            s.CodexQuotaText = quota.CodexText;
+            s.CodexQuotaState = quota.CodexState;
+            s.ClaudeQuotaText = quota.ClaudeText;
+            s.ClaudeQuotaState = quota.ClaudeState;
+            s.ArkQuotaText = quota.ArkText;
+            s.ArkQuotaState = quota.ArkState;
+
+            foreach (var line in quota.Lines.Take(8))
+                s.ModelQuotaLines.Add(line);
+
+            if (quota.Stale && !string.IsNullOrWhiteSpace(s.StatusLine))
+                s.StatusLine += " | 模型额度缓存较旧";
+            else if (quota.Stale)
+                s.StatusLine = "模型额度缓存较旧；额度只展示最后可信读数/冷却状态。";
         }
 
         UsageCacheSummary ReadUsageCacheSummary()
@@ -3135,6 +3312,461 @@ namespace OpenClawLocalMonitor
                 summary.Error = ex.Message;
                 return summary;
             }
+        }
+
+        ModelQuotaSummary ReadModelQuotaSummary()
+        {
+            var summary = new ModelQuotaSummary();
+            try
+            {
+                var script =
+                    "cat ~/.openclaw/workspace/codex-main-bridge/agent-room/model_quota_signal.json 2>/dev/null; " +
+                    "printf '\\n---OPENCLAW_AGENT_QUOTA_STATE---\\n'; " +
+                    "cat ~/.openclaw/workspace/codex-main-bridge/agent-room/agent_quota_state.json 2>/dev/null; " +
+                    "printf '\\n---OPENCLAW_QUOTA_LEDGER---\\n'; " +
+                    "cat ~/.openclaw/workspace/codex-main-bridge/agent-room/quota_ledger.json 2>/dev/null";
+                var result = RunProcess("wsl.exe", new[] { "-d", WslDistro, "--", "bash", "-lc", script }, 3000);
+                if (!result.Ok || string.IsNullOrWhiteSpace(result.Stdout))
+                {
+                    summary.Error = "未找到 Agent Room 模型额度缓存。";
+                    return summary;
+                }
+
+                var parts = result.Stdout.Split(new[] { "\n---OPENCLAW_AGENT_QUOTA_STATE---\n" }, 2, StringSplitOptions.None);
+                var signalText = parts.Length > 0 ? parts[0] : "";
+                var rest = parts.Length > 1 ? parts[1] : "";
+                var restParts = rest.Split(new[] { "\n---OPENCLAW_QUOTA_LEDGER---\n" }, 2, StringSplitOptions.None);
+                var agentStateText = restParts.Length > 0 ? restParts[0] : "";
+                var ledgerText = restParts.Length > 1 ? restParts[1] : "";
+
+                var signal = string.IsNullOrWhiteSpace(signalText)
+                    ? new Dictionary<string, object>()
+                    : AsDict(json.DeserializeObject(ExtractJsonObject(signalText)));
+                var agentState = string.IsNullOrWhiteSpace(agentStateText)
+                    ? new Dictionary<string, object>()
+                    : AsDict(json.DeserializeObject(ExtractJsonObject(agentStateText)));
+                var ledger = string.IsNullOrWhiteSpace(ledgerText)
+                    ? new Dictionary<string, object>()
+                    : AsDict(json.DeserializeObject(ExtractJsonObject(ledgerText)));
+
+                summary.GeneratedAt = Convert.ToString(Get(signal, "updated_at") ?? Get(signal, "generated_at") ?? "") ?? "";
+                summary.AgeMs = UsageCacheAgeMs(summary.GeneratedAt);
+                var expiresAt = Convert.ToString(Get(signal, "expires_at") ?? "") ?? "";
+                summary.Stale = summary.AgeMs > 15L * 60L * 1000L || TimestampInPast(expiresAt);
+                var hasTokenChannels = FillTokenChannelQuotaSummary(summary, signal);
+
+                var signals = AsDict(Get(signal, "signals"));
+                var codexRow = PickModelQuotaRow(AsDict(Get(signals, "codex")), "gpt-5.5");
+                var mainRow = PickModelQuotaRow(AsDict(Get(signals, "openclaw-main")), "gpt-5.5");
+                summary.CodexText = FormatProviderQuotaCard(codexRow, summary.Stale);
+                summary.CodexState = ProviderQuotaState(codexRow, summary.Stale);
+                summary.MainText = FormatProviderQuotaCard(mainRow, summary.Stale);
+                summary.MainState = ProviderQuotaState(mainRow, summary.Stale);
+
+                var agents = AsDict(Get(agentState, "agents"));
+                var claude = AsDict(Get(agents, "claude-code"));
+                var claudeModels = AsDict(Get(claude, "models"));
+                var availability = CountModelAvailability(claudeModels);
+                if (availability.Item2 > 0)
+                {
+                    summary.ClaudeText = availability.Item1 + "/" + availability.Item2 + " 可用";
+                    summary.ClaudeState = availability.Item1 > 0 ? "good" : "bad";
+                    summary.Lines.Add("Claude Code · Ark 模型状态 · " + summary.ClaudeText);
+                    foreach (var entry in claudeModels)
+                    {
+                        var model = Convert.ToString(entry.Key ?? "-") ?? "-";
+                        var row = AsDict(entry.Value);
+                        summary.Lines.Add("Ark · " + model + " · " + ModelStateLabel(row));
+                    }
+                }
+
+                var ledgerModels = AsDict(Get(ledger, "models"));
+                var numericRemainingKnown = false;
+                foreach (var entry in ledgerModels)
+                {
+                    var row = AsDict(entry.Value);
+                    if (ToLong(Get(row, "requests_remaining")) >= 0 || ToLong(Get(row, "tokens_remaining")) >= 0)
+                    {
+                        numericRemainingKnown = true;
+                        break;
+                    }
+                }
+                summary.ArkText = numericRemainingKnown ? "有余额信号" : "余额未知";
+                summary.ArkState = numericRemainingKnown ? "good" : "warn";
+
+                if (!hasTokenChannels)
+                {
+                    AddProviderQuotaLine(summary, "Main GPT", mainRow, summary.Stale);
+                    AddProviderQuotaLine(summary, "Codex GPT", codexRow, summary.Stale);
+                    var fallbackLines = new List<string>();
+                    if (!string.IsNullOrWhiteSpace(summary.CodexText) && summary.CodexText != "-" && summary.CodexText != "未知")
+                        fallbackLines.Add("Codex " + summary.CodexText);
+                    if (availability.Item2 > 0)
+                        fallbackLines.Add("Ark Coding " + summary.ClaudeText);
+                    if (fallbackLines.Count > 0)
+                    {
+                        summary.ChannelText = string.Join("\n", fallbackLines.ToArray());
+                        summary.ChannelState = summary.CodexState == "bad" || summary.ArkState == "bad" ? "bad" : "warn";
+                    }
+                }
+                if (!numericRemainingKnown && !hasTokenChannels)
+                    summary.Lines.Add("Ark Coding · 未发现可信剩余额度 header；只展示可用/冷却状态，不虚构余额。");
+
+                summary.Available = summary.Lines.Count > 0 || summary.ChannelText != "-" || !string.IsNullOrWhiteSpace(summary.CodexText) || availability.Item2 > 0;
+                return summary;
+            }
+            catch (Exception ex)
+            {
+                summary.Error = ex.Message;
+                return summary;
+            }
+        }
+
+        bool FillTokenChannelQuotaSummary(ModelQuotaSummary summary, Dictionary<string, object> signal)
+        {
+            var channels = AsDict(Get(signal, "token_channels"));
+            if (channels.Count == 0) return false;
+
+            var signals = AsDict(Get(signal, "signals"));
+            var codexProviderRow = PickModelQuotaRow(AsDict(Get(signals, "codex")), "gpt-5.5");
+            var cardLines = new List<string>();
+            var state = "good";
+            foreach (var entry in channels.OrderBy(e => TokenChannelSortKey(Convert.ToString(e.Key ?? ""))))
+            {
+                var channel = AsDict(entry.Value);
+                if (channel.Count == 0) continue;
+                var id = Convert.ToString(Get(channel, "id") ?? entry.Key ?? "") ?? "";
+                var name = Convert.ToString(Get(channel, "display_name") ?? id) ?? id;
+                var windows = AsList(Get(channel, "windows"));
+                string windowState;
+                string limitation;
+                var channelStale = summary.Stale || TimestampInPast(Convert.ToString(Get(channel, "expires_at") ?? "") ?? "");
+                var windowText = FormatTokenChannelWindows(windows, channelStale, out windowState, out limitation);
+                var channelStatus = (Convert.ToString(Get(channel, "status") ?? "") ?? "").Trim().ToLowerInvariant();
+                var usageApiStatus = (Convert.ToString(Get(channel, "usage_api_status") ?? "") ?? "").Trim().ToLowerInvariant();
+                if (id.IndexOf("codex", StringComparison.OrdinalIgnoreCase) >= 0
+                    && !HasDisplayableQuotaWindows(windows)
+                    && codexProviderRow.Count > 0
+                    && ToBool(Get(codexProviderRow, "remaining_known")))
+                {
+                    windowText = FormatProviderWindowSummary(codexProviderRow, channelStale, out windowState);
+                    limitation = Convert.ToString(Get(codexProviderRow, "limitation") ?? "") ?? "";
+                    var providerSource = Convert.ToString(Get(codexProviderRow, "trusted_remaining_source") ?? Get(codexProviderRow, "source") ?? "") ?? "";
+                    if (!string.IsNullOrWhiteSpace(providerSource))
+                        summary.Lines.Add("额度通道 · " + name + " · 可信来源 " + Trim(providerSource, 80));
+                }
+                else if ((id.IndexOf("ark", StringComparison.OrdinalIgnoreCase) >= 0 || id.IndexOf("volc", StringComparison.OrdinalIgnoreCase) >= 0)
+                    && usageApiStatus == "authorized_empty_or_unbound_plan")
+                {
+                    windowText = ToBool(Get(channel, "runtime_api_key_known")) ? "API已认证/套餐未绑定" : "套餐未绑定";
+                    windowState = "warn";
+                    limitation = Convert.ToString(Get(channel, "limitation") ?? "") ?? "";
+                    if (string.IsNullOrWhiteSpace(limitation))
+                        limitation = "Ark OpenAPI 已接受 AK/SK，但未返回绑定 Coding Plan 用量窗口；不使用旧控制台快照或本地观测次数当作额度。";
+                }
+                else if ((windows == null || windows.Count == 0) && ToBool(Get(channel, "availability_known")) && channelStatus == "available")
+                {
+                    windowText = channelStale ? "可用/额度窗口过期" : "可用/额度窗口待刷新";
+                    windowState = "warn";
+                    limitation = "模型可用状态来自本地成功/失败记录；5h/周额度窗口需等待后台官方刷新。";
+                }
+                var consumers = FormatConsumers(AsList(Get(channel, "consumers")));
+                var source = Convert.ToString(Get(channel, "source") ?? "") ?? "";
+
+                cardLines.Add(Trim(name, 18) + " " + windowText);
+                summary.Lines.Add("额度通道 · " + name + " · " + windowText + (string.IsNullOrWhiteSpace(consumers) ? "" : " · 使用 " + consumers));
+                if (!string.IsNullOrWhiteSpace(limitation))
+                    summary.Lines.Add("额度通道 · " + name + " · " + Trim(limitation, 110));
+                else if (!string.IsNullOrWhiteSpace(source))
+                    summary.Lines.Add("额度通道 · " + name + " · 来源 " + Trim(source, 80));
+
+                state = WorseState(state, windowState);
+            }
+
+            if (cardLines.Count == 0) return false;
+            summary.ChannelText = string.Join("\n", cardLines.Take(3).ToArray());
+            if (cardLines.Count > 3) summary.ChannelText += "\n+" + (cardLines.Count - 3) + " 个通道";
+            summary.ChannelState = state;
+            return true;
+        }
+
+        bool HasDisplayableQuotaWindows(ArrayList windows)
+        {
+            if (windows == null || windows.Count == 0) return false;
+            foreach (var item in windows.Cast<object>())
+            {
+                var row = AsDict(item);
+                var sourceKind = (Convert.ToString(Get(row, "source_kind") ?? "") ?? "").Trim();
+                var displayFlag = Get(row, "display_in_quota_card");
+                var displayInQuotaCard = displayFlag == null || ToBool(displayFlag);
+                var historicalOnly = ToBool(Get(row, "historical_only")) || sourceKind.Equals("console_snapshot", StringComparison.OrdinalIgnoreCase);
+                var observedOnly = ToBool(Get(row, "observed_only")) || Convert.ToString(Get(row, "source") ?? "").StartsWith("local_observed_requests", StringComparison.OrdinalIgnoreCase);
+                if (displayInQuotaCard && !historicalOnly && !observedOnly && ToBool(Get(row, "remaining_known")))
+                    return true;
+            }
+            return false;
+        }
+
+        string FormatProviderWindowSummary(Dictionary<string, object> row, bool stale, out string state)
+        {
+            state = stale ? "warn" : ProviderQuotaState(row, false);
+            var windows = AsList(Get(row, "windows"));
+            var parts = new List<string>();
+            foreach (var item in windows.Cast<object>())
+            {
+                var window = AsDict(item);
+                if (!ToBool(Get(window, "remaining_known"))) continue;
+                var label = NormalizeQuotaWindowLabel(Convert.ToString(Get(window, "label") ?? "") ?? "");
+                var remaining = ToDouble(Get(window, "remaining_percent"));
+                if (remaining >= 0)
+                    parts.Add(label + "余" + remaining.ToString("0.#") + "%");
+            }
+            if (parts.Count > 0)
+                return stale ? "缓存过期/" + string.Join(" / ", parts.Take(3).ToArray()) : string.Join(" / ", parts.Take(3).ToArray());
+            var units = Convert.ToString(Get(row, "remaining_units") ?? "") ?? "";
+            if (!string.IsNullOrWhiteSpace(units)) return stale ? "缓存过期/" + Trim(units, 48) : Trim(units, 48);
+            if (ToBool(Get(row, "remaining_known")))
+            {
+                var remaining = ToDouble(Get(row, "remaining_percent"));
+                if (remaining >= 0) return stale ? "缓存过期/" + remaining.ToString("0.#") + "%" : remaining.ToString("0.#") + "%";
+            }
+            var status = Convert.ToString(Get(row, "status") ?? "") ?? "";
+            return string.IsNullOrWhiteSpace(status) ? "未知" : ModelStateLabel(row);
+        }
+
+        static string TokenChannelSortKey(string id)
+        {
+            id = (id ?? "").ToLowerInvariant();
+            if (id.Contains("codex")) return "00-" + id;
+            if (id.Contains("ark") || id.Contains("volc")) return "01-" + id;
+            return "10-" + id;
+        }
+
+        string FormatTokenChannelWindows(ArrayList windows, bool stale, out string state, out string limitation)
+        {
+            state = stale ? "warn" : "good";
+            limitation = "";
+            if (windows == null || windows.Count == 0)
+            {
+                state = "warn";
+                return stale ? "缓存过期" : "5h/周待刷新";
+            }
+
+            var parts = new List<string>();
+            foreach (var item in windows.Cast<object>())
+            {
+                var row = AsDict(item);
+                var label = NormalizeQuotaWindowLabel(Convert.ToString(Get(row, "label") ?? "") ?? "");
+                var sourceKind = (Convert.ToString(Get(row, "source_kind") ?? "") ?? "").Trim();
+                var displayFlag = Get(row, "display_in_quota_card");
+                var displayInQuotaCard = displayFlag == null || ToBool(displayFlag);
+                var historicalOnly = ToBool(Get(row, "historical_only")) || sourceKind.Equals("console_snapshot", StringComparison.OrdinalIgnoreCase);
+                if (!displayInQuotaCard || historicalOnly)
+                {
+                    state = WorseState(state, "warn");
+                    if (string.IsNullOrWhiteSpace(limitation))
+                    {
+                        var note = Convert.ToString(Get(row, "limitation") ?? "") ?? "";
+                        limitation = string.IsNullOrWhiteSpace(note)
+                            ? "旧控制台快照只作为历史证据，不作为当前额度依据；等待官方 API 实时用量。"
+                            : note;
+                    }
+                    continue;
+                }
+                var observedOnly = ToBool(Get(row, "observed_only")) || Convert.ToString(Get(row, "source") ?? "").StartsWith("local_observed_requests", StringComparison.OrdinalIgnoreCase);
+                if (observedOnly)
+                {
+                    state = WorseState(state, "warn");
+                    if (string.IsNullOrWhiteSpace(limitation))
+                    {
+                        var note = Convert.ToString(Get(row, "limitation") ?? "") ?? "";
+                        limitation = string.IsNullOrWhiteSpace(note) ? "Ark 本地观测调用次数只用于诊断，不作为官方额度展示。" : note;
+                    }
+                    continue;
+                }
+                var usedKnown = ToBool(Get(row, "used_known"));
+                var usedRequests = ToLong(Get(row, "used_requests"));
+                var observed = ToLong(Get(row, "observed_used_requests"));
+                var limitRequests = ToLong(Get(row, "limit_requests"));
+                if (usedKnown && usedRequests >= 0 && limitRequests > 0)
+                {
+                    var text = label + "已用" + usedRequests + "/" + limitRequests;
+                    if (ToBool(Get(row, "remaining_known")))
+                    {
+                        var remaining = ToDouble(Get(row, "remaining_percent"));
+                        text += " 余" + remaining.ToString("0.#") + "%";
+                        if (!stale)
+                        {
+                            if (remaining <= 10) state = WorseState(state, "bad");
+                            else if (remaining <= 25) state = WorseState(state, "warn");
+                        }
+                    }
+                    parts.Add(text);
+                }
+                else if (usedKnown && usedRequests >= 0)
+                {
+                    state = WorseState(state, "warn");
+                    parts.Add(label + "已用" + usedRequests);
+                    if (string.IsNullOrWhiteSpace(limitation))
+                    {
+                        var note = Convert.ToString(Get(row, "limitation") ?? "") ?? "";
+                        limitation = string.IsNullOrWhiteSpace(note) ? "该通道只有已用量，缺套餐限额或官方剩余额度来源，暂不能精确计算剩余。" : note;
+                    }
+                }
+                else if (ToBool(Get(row, "remaining_known")))
+                {
+                    var remaining = ToDouble(Get(row, "remaining_percent"));
+                    var usedPercent = ToDouble(Get(row, "used_percent"));
+                    parts.Add(usedPercent > 0
+                        ? label + "已用" + usedPercent.ToString("0.#") + "%/余" + remaining.ToString("0.#") + "%"
+                        : label + "余" + remaining.ToString("0.#") + "%");
+                    if (!stale)
+                    {
+                        if (remaining <= 10) state = WorseState(state, "bad");
+                        else if (remaining <= 25) state = WorseState(state, "warn");
+                    }
+                }
+                else
+                {
+                    state = WorseState(state, "warn");
+                    parts.Add(observed >= 0 ? label + "观测" + observed + "次" : label + "待接入");
+                    if (string.IsNullOrWhiteSpace(limitation))
+                    {
+                        var note = Convert.ToString(Get(row, "limitation") ?? "") ?? "";
+                        limitation = string.IsNullOrWhiteSpace(note) ? "官方剩余额度来源待接入；当前显示本地通道识别和观测用量。" : note;
+                    }
+                }
+            }
+
+            if (stale) state = WorseState(state, "warn");
+            return parts.Count == 0 ? "5h/周待刷新" : string.Join(" / ", parts.Take(3).ToArray());
+        }
+
+        static string NormalizeQuotaWindowLabel(string label)
+        {
+            var key = (label ?? "").Trim().ToLowerInvariant();
+            if (key == "week" || key == "weekly") return "周";
+            if (key == "month" || key == "monthly") return "月";
+            if (key == "5h" || key == "5hr" || key == "5hour") return "5h";
+            return string.IsNullOrWhiteSpace(label) ? "窗口" : label.Trim();
+        }
+
+        static string FormatConsumers(ArrayList consumers)
+        {
+            if (consumers == null || consumers.Count == 0) return "";
+            var names = new List<string>();
+            foreach (var item in consumers.Cast<object>().Take(4))
+            {
+                var text = Convert.ToString(item ?? "") ?? "";
+                if (!string.IsNullOrWhiteSpace(text)) names.Add(text);
+            }
+            if (names.Count == 0) return "";
+            return string.Join("/", names.ToArray()) + (consumers.Count > names.Count ? " 等" : "");
+        }
+
+        static string WorseState(string current, string candidate)
+        {
+            return StateRank(candidate) > StateRank(current) ? candidate : current;
+        }
+
+        static int StateRank(string state)
+        {
+            state = (state ?? "").Trim().ToLowerInvariant();
+            if (state == "bad") return 3;
+            if (state == "warn") return 2;
+            if (state == "work") return 1;
+            return 0;
+        }
+
+        Dictionary<string, object> PickModelQuotaRow(Dictionary<string, object> agentSignal, string preferredModel)
+        {
+            var models = AsDict(Get(agentSignal, "models"));
+            var preferred = AsDict(Get(models, preferredModel));
+            if (preferred.Count > 0) return preferred;
+            foreach (var entry in models)
+            {
+                var row = AsDict(entry.Value);
+                if (row.Count > 0) return row;
+            }
+            return new Dictionary<string, object>();
+        }
+
+        Tuple<int, int> CountModelAvailability(Dictionary<string, object> models)
+        {
+            var total = 0;
+            var available = 0;
+            foreach (var entry in models)
+            {
+                var row = AsDict(entry.Value);
+                if (row.Count == 0) continue;
+                total++;
+                var status = (Convert.ToString(Get(row, "status") ?? "") ?? "").Trim().ToLowerInvariant();
+                if (status == "available" || status == "recovered") available++;
+            }
+            return Tuple.Create(available, total);
+        }
+
+        string FormatProviderQuotaCard(Dictionary<string, object> row, bool stale)
+        {
+            if (row.Count == 0) return "未知";
+            string state;
+            var windowSummary = FormatProviderWindowSummary(row, stale, out state);
+            if (!string.IsNullOrWhiteSpace(windowSummary) && windowSummary != "未知")
+                return windowSummary;
+            if (stale) return "缓存过期";
+            if (ToBool(Get(row, "remaining_known")))
+            {
+                var remaining = ToDouble(Get(row, "remaining_percent"));
+                if (remaining >= 0) return remaining.ToString("0.#") + "%";
+            }
+            var status = Convert.ToString(Get(row, "status") ?? "") ?? "";
+            if (!string.IsNullOrWhiteSpace(status)) return ModelStateLabel(row);
+            return "未知";
+        }
+
+        string ProviderQuotaState(Dictionary<string, object> row, bool stale)
+        {
+            if (row.Count == 0 || stale) return "warn";
+            if (ToBool(Get(row, "remaining_known")))
+            {
+                var remaining = ToDouble(Get(row, "remaining_percent"));
+                if (remaining <= 10) return "bad";
+                if (remaining <= 25) return "warn";
+                return "good";
+            }
+            return "warn";
+        }
+
+        void AddProviderQuotaLine(ModelQuotaSummary summary, string label, Dictionary<string, object> row, bool stale)
+        {
+            if (row.Count == 0)
+            {
+                summary.Lines.Add(label + " · 暂无额度信号");
+                return;
+            }
+            var model = Convert.ToString(Get(row, "model") ?? "") ?? "";
+            var units = Convert.ToString(Get(row, "remaining_units") ?? "") ?? "";
+            var resetAt = Convert.ToString(Get(row, "reset_at") ?? "") ?? "";
+            var source = Convert.ToString(Get(row, "trusted_remaining_source") ?? Get(row, "source") ?? "") ?? "";
+            var prefix = label + (string.IsNullOrWhiteSpace(model) ? "" : " · " + model);
+            if (stale)
+                summary.Lines.Add(prefix + " · 缓存过期 · 最后读数 " + Trim(units, 42));
+            else if (!string.IsNullOrWhiteSpace(units))
+                summary.Lines.Add(prefix + " · " + Trim(units, 58) + (string.IsNullOrWhiteSpace(resetAt) ? "" : " · 重置 " + Trim(resetAt, 19)));
+            else
+                summary.Lines.Add(prefix + " · 无可信剩余额度数值" + (string.IsNullOrWhiteSpace(source) ? "" : " · " + Trim(source, 42)));
+        }
+
+        string ModelStateLabel(Dictionary<string, object> row)
+        {
+            var status = (Convert.ToString(Get(row, "status") ?? "") ?? "").Trim().ToLowerInvariant();
+            var reason = Convert.ToString(Get(row, "reason") ?? Get(row, "previous_reason") ?? "") ?? "";
+            var cooldown = Convert.ToString(Get(row, "cooldown_until") ?? "") ?? "";
+            if (status == "available" || status == "recovered") return "可用";
+            if (status == "depleted") return string.IsNullOrWhiteSpace(cooldown) ? "耗尽" : "冷却到 " + Trim(cooldown, 19);
+            if (status == "cooldown") return string.IsNullOrWhiteSpace(cooldown) ? "冷却" : "冷却到 " + Trim(cooldown, 19);
+            if (!string.IsNullOrWhiteSpace(reason)) return Trim(reason, 30);
+            return string.IsNullOrWhiteSpace(status) ? "未知" : status;
         }
 
         void FillReliabilitySnapshot(Snapshot s)
@@ -3834,8 +4466,8 @@ namespace OpenClawLocalMonitor
 
         string OpenClawBootstrapScript()
         {
-            return "OPENCLAW_BIN=" + ShellQuote(OpenClawAbsolutePath) + "\n" +
-                "[ -x \"$OPENCLAW_BIN\" ] || OPENCLAW_BIN=$(command -v openclaw 2>/dev/null || true)\n" +
+            return "OPENCLAW_BIN=\"${OPENCLAW_BIN:-}\"\n" +
+                "[ -n \"$OPENCLAW_BIN\" ] || { [ -x \"$HOME/.local/bin/openclaw\" ] && OPENCLAW_BIN=\"$HOME/.local/bin/openclaw\" || OPENCLAW_BIN=$(command -v openclaw 2>/dev/null || true); }\n" +
                 "[ -n \"$OPENCLAW_BIN\" ] || exit 127\n";
         }
 
@@ -3924,10 +4556,17 @@ namespace OpenClawLocalMonitor
             SetCard(tokenCache, s.TokenCacheRead > 0 ? "good" : "warn");
             tokenCost.Value.Text = s.CostText;
             SetCard(tokenCost, s.CostState);
-            tokenSectionVisible = s.UsageCacheVisible;
+            quotaMain.Value.Text = s.TokenChannelQuotaText;
+            SetCard(quotaMain, s.TokenChannelQuotaState);
+            quotaCodex.Value.Text = "";
+            quotaClaude.Value.Text = "";
+            quotaArk.Value.Text = "";
+            tokenSectionVisible = s.UsageCacheVisible || s.ModelQuotaVisible;
             if (tokenHeader != null) tokenHeader.Visible = tokenSectionVisible;
-            foreach (var card in new[] { tokenTotal, tokenInput, tokenOutput, tokenCache, tokenCost })
+            foreach (var card in new[] { tokenTotal, tokenInput, tokenOutput, tokenCache, tokenCost, quotaMain })
                 card.Panel.Visible = tokenSectionVisible;
+            foreach (var card in new[] { quotaCodex, quotaClaude, quotaArk })
+                card.Panel.Visible = false;
             if (costHintPopup != null) costHintPopup.Visible = false;
             LayoutUi();
 
@@ -3941,11 +4580,51 @@ namespace OpenClawLocalMonitor
             if (s.Sessions.Count == 0) sessionList.Items.Add("暂未读取到会话数据。");
 
             logList.Items.Clear();
+            foreach (var row in s.ModelQuotaLines.Take(8)) logList.Items.Add(row);
             foreach (var row in s.Logs) logList.Items.Add(row);
 
             collabStatusLabel.Text = string.IsNullOrWhiteSpace(s.CollabStatus) ? "" : "🤖 协作状态: " + s.CollabStatus.Replace("\n", " | ");
 
             statusLine.Text = s.StatusLine;
+        }
+
+        void RenderTokenChannelSnapshot(Snapshot s)
+        {
+            if (tokenTotal == null || quotaMain == null) return;
+
+            tokenTotal.Value.Text = s.TokenContext != "-" ? s.TokenContext : FormatTokens(s.TokenTotal);
+            SetCard(tokenTotal, s.TokenTotal > 0 ? "work" : "warn");
+            tokenInput.Value.Text = FormatTokens(s.TokenInput);
+            SetCard(tokenInput, s.TokenInput > 0 ? "good" : "warn");
+            tokenOutput.Value.Text = FormatTokens(s.TokenOutput);
+            SetCard(tokenOutput, s.TokenOutput > 0 ? "good" : "warn");
+            tokenCache.Value.Text = FormatTokens(s.TokenCacheRead);
+            SetCard(tokenCache, s.TokenCacheRead > 0 ? "good" : "warn");
+            tokenCost.Value.Text = s.CostText;
+            SetCard(tokenCost, s.CostState);
+            quotaMain.Value.Text = s.TokenChannelQuotaText;
+            SetCard(quotaMain, s.TokenChannelQuotaState);
+
+            tokenSectionVisible = s.UsageCacheVisible || s.ModelQuotaVisible;
+            if (tokenHeader != null) tokenHeader.Visible = tokenSectionVisible;
+            foreach (var card in new[] { tokenTotal, tokenInput, tokenOutput, tokenCache, tokenCost, quotaMain })
+                card.Panel.Visible = tokenSectionVisible;
+            foreach (var card in new[] { quotaCodex, quotaClaude, quotaArk })
+                card.Panel.Visible = false;
+
+            if (s.ModelQuotaLines.Count > 0 && logList != null && logList.Items.Count > 0)
+            {
+                var preserved = logList.Items.Cast<object>()
+                    .Select(x => Convert.ToString(x ?? "") ?? "")
+                    .Where(x => !x.StartsWith("额度通道 · ", StringComparison.Ordinal))
+                    .Take(20)
+                    .ToList();
+                logList.Items.Clear();
+                foreach (var row in s.ModelQuotaLines.Take(8)) logList.Items.Add(row);
+                foreach (var row in preserved) logList.Items.Add(row);
+            }
+
+            LayoutUi();
         }
 
         string HeroTitle(Snapshot s)
@@ -4230,6 +4909,14 @@ namespace OpenClawLocalMonitor
             DateTimeOffset parsed;
             if (!DateTimeOffset.TryParse(generatedAt, out parsed)) return -1;
             return (long)Math.Max(0, (DateTimeOffset.Now - parsed.ToLocalTime()).TotalMilliseconds);
+        }
+
+        static bool TimestampInPast(string timestamp)
+        {
+            if (string.IsNullOrWhiteSpace(timestamp)) return false;
+            DateTimeOffset parsed;
+            if (!DateTimeOffset.TryParse(timestamp, out parsed)) return false;
+            return parsed.ToLocalTime() < DateTimeOffset.Now;
         }
 
         static string Trim(string text, int max)

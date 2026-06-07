@@ -1,0 +1,8 @@
+*.sh text eol=lf
+*.bash text eol=lf
+*.py text eol=lf
+*.service text eol=lf
+*.timer text eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.md text eol=lf

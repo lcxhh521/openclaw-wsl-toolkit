@@ -2,8 +2,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-export OPENCLAW_BACKGROUND_WORKER="${OPENCLAW_BACKGROUND_WORKER:-1}"
-export OPENCLAW_BACKGROUND_SILENT_TELEGRAM="${OPENCLAW_BACKGROUND_SILENT_TELEGRAM:-1}"
 
 load_env_exports() {
   local file="$1"
@@ -29,6 +27,10 @@ load_env_exports() {
 }
 
 load_env_exports "${OPENCLAW_DEEPSEEK_ENV:-$HOME/.openclaw/secrets/agent-room-deepseek.env}"
+load_env_exports "${OPENCLAW_VOLCENGINE_ENV:-$HOME/.openclaw/secrets/volcengine.env}"
+
+export OPENCLAW_BACKGROUND_WORKER="${OPENCLAW_BACKGROUND_WORKER:-1}"
+export OPENCLAW_BACKGROUND_SILENT_TELEGRAM="${OPENCLAW_BACKGROUND_SILENT_TELEGRAM:-1}"
 export OPENCLAW_ALLOW_FORMAL_OPENAI_COMPAT_FALLBACK="${OPENCLAW_ALLOW_FORMAL_OPENAI_COMPAT_FALLBACK:-1}"
 export OPENCLAW_FORMAL_OPENAI_COMPAT_FALLBACK_MODELS="${OPENCLAW_FORMAL_OPENAI_COMPAT_FALLBACK_MODELS:-deepseek-v4-pro}"
 export OPENCLAW_FORMAL_OPENAI_COMPAT_FALLBACK_MODEL="${OPENCLAW_FORMAL_OPENAI_COMPAT_FALLBACK_MODEL:-deepseek-v4-pro}"
@@ -47,4 +49,4 @@ if [[ -f "$GATE" ]]; then
     python3 "$SCRIPT_DIR/people_daily_workflow.py" "$@"
 fi
 
-python3 "$SCRIPT_DIR/people_daily_workflow.py" "$@"
+exec python3 "$SCRIPT_DIR/people_daily_workflow.py" "$@"
