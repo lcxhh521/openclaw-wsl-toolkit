@@ -35,6 +35,74 @@ Operational requirements:
 - Do not send long reasoning, translated content, layout deliberation, or self-justifying completion narratives back to main chat.
 - `candidate_ready` means ready for main-side verification, not accepted/final.
 
+## Background watchdog visibility
+
+Translation watchdogs, recovery ticks, heartbeats, and scheduled supervision are
+background control-plane work. They must not appear as routine Telegram/chat
+messages.
+
+- Run watchdogs as isolated/background tasks with `delivery: none` whenever
+  possible.
+- Write watchdog status, no-op checks, recovery actions, and gate results to
+  run-local files such as `pdf_supervision_status_*.md` and `reports/*.md`.
+- Do not call Telegram/message-send tools from a watchdog for ordinary status,
+  heartbeats, stale-worker checks, or internal gate passes.
+- If a watchdog finds a true user-decision blocker or a new deliverable that
+  needs Alex's review, write a `pending_user_notification_*.md` artifact for the
+  main session to relay deliberately.
+- Main should batch or summarize those pending notifications into normal
+  user-facing updates. It should not expose raw watchdog narration unless Alex
+  explicitly asks to inspect it.
+
+## Resumability and candidate status
+
+Long translation/PDF jobs must be restartable from files, not from a prior
+worker's chat transcript. The translation agent owns durable runtime state; main
+only supervises and verifies it.
+
+- Maintain a run-local state file, for example
+  `translation_agent_runtime_state_*.json`, with `status`, `current_step`,
+  `last_completed_step`, `last_artifact`, `next_command`, `known_blockers`, and
+  `updated_at`.
+- Record the deterministic recovery command in the run directory before doing
+  material PDF work. If a worker is interrupted, a replacement worker must be
+  able to continue from that command and the state/report files.
+- Use explicit candidate labels. A generated PDF is not final merely because it
+  exists or passes a basic build gate. Recommended labels:
+  `internal_deterministic_rebuild`, `repair_needed_internal`,
+  `candidate_for_review`, `final_candidate_pending_main_verification`,
+  `blocked`, and `rejected`.
+- `candidate_for_review` requires all deterministic gates to pass and all
+  required model-review evidence to be current for the latest artifact hash.
+  Stale model review from a previous PDF build does not promote a new PDF.
+- Main/Alex acceptance is the only step that can turn a candidate into a final
+  delivered artifact.
+
+## Do-not-repeat failure ledger
+
+These failure modes were observed in prior full-book bilingual PDF work and must
+be treated as known risks, not surprises:
+
+- Do not refuse, downgrade, summarize, or narrow a requested translation when
+  the source/task is available and Alex has authorized the requested scope.
+- Do not let the main Telegram session become the hidden translation/PDF worker.
+  Main can supervise, verify, and do emergency repairs, but the translation
+  agent must own translation, layout, state, recovery, and candidate reports.
+- Do not infer completion from a worker status message, a generated file, or a
+  basic PDF build gate. Completion requires artifact-based acceptance gates.
+- Do not reuse model-review evidence across PDF builds. Every sendable
+  candidate must have review/gate evidence current for that artifact's hash.
+- Do not patch only the page or screenshot Alex cited. Record the defect, add or
+  tighten a regression gate, and scan nearby/continuation pages plus the whole
+  artifact for the same failure mode.
+- Do not treat OCR text presence as layout success. Tables, charts, formulas,
+  and figure-like pages must remain structural or be preserved as source images;
+  OCR rows rendered as vertical prose are a candidate failure.
+- Do not let watchdogs, heartbeats, stale-worker checks, or gate-pass narration
+  leak into Telegram as routine status.
+- Do not close or clean a run without first preserving the error/learning record
+  that should improve future translation-agent behavior.
+
 Main-side helper:
 
 ```bash
@@ -230,7 +298,13 @@ For full-book work, formal completion requires:
 - all planned section files exist and are non-empty;
 - all split-part files have been merged into their formal section files;
 - final Markdown/HTML/PDF or requested formats exist;
+- run-local state names the latest artifact, next recovery command, and any
+  blockers;
 - source coverage audit has no unexplained low-coverage ranges;
+- bilingual integrity gate has no significant source-only/translation-only body blocks for bilingual/parallel-text deliverables;
+- PDF table/chart layout integrity has no source table, chart, or figure page flattened into one-column OCR paragraph fragments;
+- model-review reports, when required, are current for the latest artifact hash
+  and not copied forward from a prior build;
 - final PDF has Chinese-capable font embedding/no missing glyph warnings when PDF is requested.
 
 ### 4. Coverage audit requirement
@@ -254,6 +328,61 @@ For full-book or complete-document tasks, perform a coverage audit before claimi
 - document known exclusions such as page headers, page numbers, repeated table headers, or OCR garbage.
 
 If source is an English PDF and final output is English-Chinese paragraph-by-paragraph, a final PDF with similar or fewer pages than the source is a warning sign. It is not automatically wrong, but it requires explicit page-count/word-count/coverage explanation before final delivery.
+
+### 4.1 Bilingual integrity gate
+
+For bilingual or paragraph-by-paragraph outputs, coverage is not just page
+coverage. The final artifacts must also preserve the requested EN/ZH rhythm.
+
+Before candidate promotion, run:
+
+```bash
+python3 tools/translation-agent/translation_bilingual_integrity.py \
+  --run-dir <run-dir> \
+  --expect-bilingual auto \
+  --out bilingual_integrity_gate.json \
+  --md-out bilingual_integrity_gate.md
+```
+
+This gate fails candidate promotion when it finds substantial English-only or
+Chinese-only body blocks, Chinese-dominant body pages in a bilingual PDF, or
+repeated Chinese body text that suggests the original source text was dropped.
+
+### 4.2 Table/chart layout integrity
+
+For PDF or book deliverables, tables, charts, figures, and preformatted source
+pages are structure, not ordinary prose. The workflow must render them as one of:
+
+- normalized structured tables/preformatted blocks when reliable; or
+- preserved source figure/page images with clear surrounding bilingual context
+  when OCR/table reconstruction would damage the layout.
+
+Before candidate promotion, the final PDF gate must scan for source table/chart
+markers that have been flattened into many small paragraph text blocks, for
+example portfolio holdings, market quotes, `% Change`, `Net Asset Value`,
+`Long/Short`, exposure, investment-position rows, or similar numeric table
+pages. A page-level table/layout failure is a blocker even if the words are
+present.
+
+If Alex cites a page where a table or figure is broken, repair cannot stop at
+that page. The translation/layout workflow must scan the cited page, nearby
+pages, and continuation pages for the same OCR-to-paragraph failure mode, then
+add or tighten a deterministic gate before re-promoting.
+
+### 4.3 User feedback regression loop
+
+When Alex finds a candidate defect, treat it as a missed-system defect by
+default. The translation workflow must not only patch the visible page. It must:
+
+- record the defect in `reader_feedback_defect_ledger*.json`;
+- name the root cause and why existing gates/model review missed it;
+- add or tighten a deterministic regression gate that scans the whole artifact;
+- scan the cited page plus surrounding and continuation pages for the same
+  failure mode before declaring the repair complete;
+- keep the defect open until the latest rebuilt artifact passes that regression.
+
+Model review can help diagnose or repair the issue, but a model pass cannot
+override an open feedback defect or a failed deterministic regression gate.
 
 ### 5. Provider/tool failure handling
 
@@ -305,6 +434,7 @@ Default style for full-book bilingual PDFs:
 - Design a proper title/cover page separately; do not make the cover look like a literal paragraph-by-paragraph bilingual sample.
 - Keep bilingual paragraph rhythm simple and consistent across the whole book: English paragraph, then Chinese paragraph below, separated by modest spacing. Do not let later chapters switch into a different inline/merged style.
 - Build a normalized intermediate representation before PDF rendering. Each block should be typed as title, heading, bilingual_pair, source_only, translation_only, table/preformatted, note, or list. Do not rely on ad-hoc CSS over raw Markdown for long books.
+- Tables, charts, and figure-like source pages must either stay as structured tables/preformatted blocks or be preserved as source images; never ship OCR table rows as vertical one-column prose.
 - OCR garbage, mojibake, broken hyphenation, corrupted symbols, and page-header/footer debris must be detected and either corrected, excluded with documentation, or marked for review. Do not silently ship visible乱码/gibberish in the final PDF.
 - Use subtle typography: clear heading hierarchy, reasonable margins, readable line height, page numbers, compact tables/preformatted table blocks.
 - Embed Chinese-capable fonts and verify no missing glyph warnings.

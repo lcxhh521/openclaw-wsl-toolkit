@@ -32,6 +32,7 @@ CONTRACT_DOC = WORKSPACE / "openclaw-telegram-wsl-setup/docs/translation-agent-c
 ISOLATION_DOC = WORKSPACE / "openclaw-telegram-wsl-setup/docs/translation-agent-isolation-protocol.md"
 ARTIFACT_GATE = WORKSPACE / "openclaw-telegram-wsl-setup/tools/translation-agent/translation_artifact_gate.py"
 ACCEPTANCE_GATE = WORKSPACE / "openclaw-telegram-wsl-setup/tools/translation-agent/translation_acceptance_gate.py"
+BILINGUAL_INTEGRITY_GATE = WORKSPACE / "openclaw-telegram-wsl-setup/tools/translation-agent/translation_bilingual_integrity.py"
 SCHEMA = "openclaw.translation_task_entry.v0"
 
 
@@ -104,12 +105,18 @@ Read `user_request.md`. It is Alex's original request and must be preserved as t
 - Write all worker artifacts under this run directory.
 - Final chat response must be exactly the JSON envelope described in `translation-agent-isolation-protocol.md`.
 - `candidate_ready` means ready for main verification, not final delivery.
+- For bilingual/parallel-text work, significant source-only or translation-only body blocks are a candidate blocker, not a cosmetic issue.
+- For PDF/book deliverables, source tables/charts/figures must render as structured tables or preserved source images; OCR table fragments flowing as ordinary paragraphs block candidate promotion.
+- If Alex reports a candidate defect, record root cause, why existing gates missed it, and the new regression gate before re-promoting a candidate.
+- If Alex cites a defective PDF page, scan the cited page plus surrounding and continuation pages for the same failure mode before re-promoting.
+- Watchdogs, heartbeats, and scheduled recovery checks are background-only: write run-local reports and do not send routine Telegram/main-chat status.
 
 ## Protocol references
 
 - Contract: `{CONTRACT_DOC}`
 - Isolation protocol: `{ISOLATION_DOC}`
 - Main artifact gate: `{ARTIFACT_GATE}`
+- Bilingual integrity gate: `{BILINGUAL_INTEGRITY_GATE}`
 
 ## Required final response envelope
 
@@ -165,10 +172,16 @@ Follow the translation-agent isolation protocol. Write artifacts under this run 
             "scope coverage checked against user_request.md",
             "source/version boundary checked",
             "long-document coverage audit and repair complete if applicable",
+            "bilingual integrity gate passes for bilingual/parallel-text deliverables: no significant EN-only/ZH-only body blocks, no Chinese-only body pages, no repeated Chinese body text",
+            "PDF table/chart layout integrity passes when applicable: no source tables or chart pages are flattened into one-column OCR paragraph fragments",
+            "Alex/user-reported candidate defects are recorded in a defect ledger with root cause, missed-gate cause, repair target, and regression evidence; no open feedback defects remain",
+            "reader-feedback repairs include a same-failure scan across the cited page, neighboring pages, and continuation ranges before candidate promotion",
+            "watchdog/heartbeat supervision is silent by default: internal checks write run-local reports, and any user-facing relay is deliberate main-session output, not raw watchdog narration",
             "PDF/layout final verification complete if applicable",
             "delivery artifact can be sent or full file path is returned without lossy summary",
         ],
         "recommended_gate_command_template": f"python3 {ARTIFACT_GATE} --cwd {run_dir} --expect <artifact> --min-bytes <n>",
+        "recommended_bilingual_integrity_command": f"python3 {BILINGUAL_INTEGRITY_GATE} --run-dir {run_dir} --expect-bilingual auto --out bilingual_integrity_gate.json --md-out bilingual_integrity_gate.md",
         "recommended_acceptance_command": f"python3 {ACCEPTANCE_GATE} --run-dir {run_dir} --out acceptance_gate_report.json",
     }
     write_json(run_dir / "acceptance_plan.json", acceptance)
@@ -209,7 +222,7 @@ Follow the translation-agent isolation protocol. Write artifacts under this run 
             "model_selection_brief": str(run_dir / "model_selection_brief.json"),
             "delivery_plan": str(run_dir / "delivery_plan.json"),
         },
-        "next_action": "dispatch translation agent with dispatch_prompt.md, then run artifact gate before reporting success",
+        "next_action": "dispatch translation agent with dispatch_prompt.md, then run artifact, bilingual integrity, and acceptance gates before reporting success",
     }
     write_json(run_dir / "entry.json", entry)
 
@@ -229,7 +242,7 @@ Entry package created. No translation worker has been dispatched or accepted yet
 
 ## Required next step
 
-Dispatch the translation agent with `dispatch_prompt.md`; after worker output, verify artifacts with `acceptance_plan.json` and `translation_artifact_gate.py`.
+Dispatch the translation agent with `dispatch_prompt.md`; after worker output, verify artifacts with `acceptance_plan.json`, `translation_artifact_gate.py`, and `translation_bilingual_integrity.py` where applicable.
 """
     (run_dir / "main_review.md").write_text(main_review, encoding="utf-8")
 
@@ -249,7 +262,7 @@ Dispatch the translation agent with `dispatch_prompt.md`; after worker output, v
                 f"- translation entry created: {run_id}",
                 f"- status: entry_created_pending_translation_agent",
                 f"- run_dir: {run_dir}",
-                "- next: dispatch translation agent, then verify artifacts before reporting success",
+                "- next: dispatch translation agent, then verify artifact and bilingual-integrity gates before reporting success",
             ]
         )
         + "\n",

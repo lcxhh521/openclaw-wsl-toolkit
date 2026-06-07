@@ -44,7 +44,7 @@ def main() -> int:
     user_request.write_text(request_text, encoding="utf-8")
     source_lines = "\n".join(f"- {s}" for s in args.source) or "- [not specified in helper args; see user_request.md]"
     handoff.write_text(
-        f"""# Translation Agent Handoff Brief\n\nRun id: `{run_id}`\n\n## Non-negotiable isolation rules\n\n- Read `user_request.md` as the authoritative Alex request.\n- Do not narrow, summarize, reinterpret, or downgrade the request.\n- If a source/range/format decision is missing, write `needs_alex_decision` in the final envelope instead of inventing scope.\n- Write artifacts under this run directory.\n- Final chat response must be only the JSON envelope described in `TRANSLATION_AGENT_ISOLATION_PROTOCOL.md`.\n- Your `status: candidate_ready` is not final delivery; main will independently verify artifacts.\n\n## Source identifiers\n\n{source_lines}\n\n## Original user request\n\nSee `user_request.md` in this run directory.\n\n## Required final response envelope\n\n```json\n{{\n  \"status\": \"candidate_ready | blocked | failed\",\n  \"run_id\": \"{run_id}\",\n  \"manifest\": \"{run_dir}/manifest.json\",\n  \"artifacts\": [],\n  \"claims\": [],\n  \"needs_main_verification\": true,\n  \"needs_alex_decision\": []\n}}\n```\n""",
+        f"""# Translation Agent Handoff Brief\n\nRun id: `{run_id}`\n\n## Non-negotiable isolation rules\n\n- Read `user_request.md` as the authoritative Alex request.\n- Do not narrow, summarize, reinterpret, or downgrade the request.\n- If a source/range/format decision is missing, write `needs_alex_decision` in the final envelope instead of inventing scope.\n- Write artifacts under this run directory.\n- Final chat response must be only the JSON envelope described in `TRANSLATION_AGENT_ISOLATION_PROTOCOL.md`.\n- Your `status: candidate_ready` is not final delivery; main will independently verify artifacts.\n- For bilingual/parallel-text work, significant source-only or translation-only body blocks are a candidate blocker, not a cosmetic issue.\n- For PDF/book deliverables, source tables/charts/figures must render as structured tables or preserved source images; OCR table fragments flowing as ordinary paragraphs block candidate promotion.\n- If Alex reports a candidate defect, record root cause, why existing gates missed it, and the new regression gate before re-promoting a candidate.\n- If Alex cites a defective PDF page, scan the cited page plus surrounding and continuation pages for the same failure mode before re-promoting.\n- Watchdogs, heartbeats, and scheduled recovery checks are background-only: write run-local reports and do not send routine Telegram/main-chat status.\n\n## Source identifiers\n\n{source_lines}\n\n## Original user request\n\nSee `user_request.md` in this run directory.\n\n## Required final response envelope\n\n```json\n{{\n  \"status\": \"candidate_ready | blocked | failed\",\n  \"run_id\": \"{run_id}\",\n  \"manifest\": \"{run_dir}/manifest.json\",\n  \"artifacts\": [],\n  \"claims\": [],\n  \"needs_main_verification\": true,\n  \"needs_alex_decision\": []\n}}\n```\n""",
         encoding="utf-8",
     )
     ledger.write_text(
@@ -73,10 +73,16 @@ def main() -> int:
                     "scope coverage checked against user_request.md",
                     "source/version boundary checked",
                     "long-document coverage audit and repair complete if applicable",
+                    "bilingual integrity gate passes for bilingual/parallel-text deliverables",
+                    "PDF table/chart layout integrity passes when applicable; source tables and chart pages are not flattened into one-column OCR paragraph fragments",
+                    "Alex/user-reported candidate defects are recorded with root cause, missed-gate cause, repair target, and regression evidence; no open feedback defects remain",
+                    "reader-feedback repairs include a same-failure scan across the cited page, neighboring pages, and continuation ranges",
+                    "watchdog/heartbeat supervision is silent by default: internal checks write run-local reports, and any user-facing relay is deliberate main-session output, not raw watchdog narration",
                     "PDF/layout final verification complete if applicable",
                     "translation worker final envelope parsed; no long narrative accepted as final",
                 ],
                 "recommended_tool": "tools/translation_artifact_gate.py",
+                "recommended_bilingual_integrity_tool": "tools/translation-agent/translation_bilingual_integrity.py",
             },
             ensure_ascii=False,
             indent=2,

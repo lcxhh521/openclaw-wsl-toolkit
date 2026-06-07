@@ -11,9 +11,15 @@ import datetime as dt
 import json
 from pathlib import Path
 from typing import Any
+import sys
 
 
 WORKSPACE = Path(__file__).resolve().parents[3]
+TOOL_DIR = Path(__file__).resolve().parent
+if str(TOOL_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOL_DIR))
+
+from translation_bilingual_integrity import run_integrity_gate  # noqa: E402
 
 
 def now_cst() -> str:
@@ -101,6 +107,69 @@ def source_exists(run_dir: Path, source: str) -> bool:
     return any(candidate.exists() for candidate in candidates)
 
 
+def collect_default_bilingual_artifacts(run_dir: Path, manifest_artifacts: list[str]) -> list[str]:
+    artifacts = list(manifest_artifacts)
+    for name in ("translation.md", "build_html_if_needed.tmp.html"):
+        if (run_dir / name).exists():
+            artifacts.append(name)
+    for pdf in sorted(run_dir.glob("*.pdf")):
+        artifacts.append(str(pdf.relative_to(run_dir)))
+    return list(dict.fromkeys(artifacts))
+
+
+def feedback_files(run_dir: Path) -> list[Path]:
+    patterns = (
+        "reader_feedback*.md",
+        "rejected_candidate_report*.md",
+        "alex_feedback*.md",
+        "user_feedback*.md",
+    )
+    out: list[Path] = []
+    for pattern in patterns:
+        out.extend(sorted(run_dir.glob(pattern)))
+    return list(dict.fromkeys(out))
+
+
+def collect_feedback_regression(run_dir: Path) -> dict[str, Any]:
+    feedback = feedback_files(run_dir)
+    ledgers = sorted(run_dir.glob("reader_feedback_defect_ledger*.json"))
+    report: dict[str, Any] = {
+        "feedback_files": [str(path.relative_to(run_dir)) for path in feedback],
+        "ledger": None,
+        "open_defects": [],
+        "status": "not_required" if not feedback else "FAILED",
+    }
+    if not feedback:
+        return report
+    if not ledgers:
+        report["missing_ledger"] = True
+        return report
+    ledger_path = ledgers[-1]
+    report["ledger"] = str(ledger_path.relative_to(run_dir))
+    ledger = read_json(ledger_path)
+    defects = ledger.get("defects")
+    if isinstance(defects, dict):
+        defects_iter = [{**value, "defect_id": key} for key, value in defects.items() if isinstance(value, dict)]
+    elif isinstance(defects, list):
+        defects_iter = [item for item in defects if isinstance(item, dict)]
+    else:
+        defects_iter = []
+    cleared = {"cleared", "verified", "regression_passed", "closed", "superseded"}
+    open_defects = [
+        {
+            "defect_id": item.get("defect_id") or item.get("id") or "<missing>",
+            "status": item.get("status", "<missing>"),
+            "title": item.get("title") or item.get("summary") or "",
+            "gate_added": item.get("gate_added") or item.get("regression_gate") or "",
+        }
+        for item in defects_iter
+        if str(item.get("status", "")).lower() not in cleared
+    ]
+    report["open_defects"] = open_defects
+    report["status"] = "PASSED" if not open_defects else "FAILED"
+    return report
+
+
 def run_gate(run_dir: Path, min_artifact_bytes: int) -> dict[str, Any]:
     run_dir = run_dir.resolve()
     ledger = read_json(run_dir / "task_ledger.json")
@@ -153,6 +222,33 @@ def run_gate(run_dir: Path, min_artifact_bytes: int) -> dict[str, Any]:
         if size < min_artifact_bytes:
             failures.append({"gate": "artifact_too_small", "artifact": artifact, "bytes": size, "min_bytes": min_artifact_bytes})
 
+    bilingual_report = run_integrity_gate(
+        run_dir,
+        collect_default_bilingual_artifacts(run_dir, artifacts),
+        expect_bilingual="auto",
+    )
+    if bilingual_report["status"] == "FAILED":
+        failures.append(
+            {
+                "gate": "bilingual_integrity_failed",
+                "failures": bilingual_report.get("failures", [])[:10],
+            }
+        )
+    elif bilingual_report["status"] == "SKIPPED":
+        warnings.append({"gate": "bilingual_integrity_skipped", "reason": bilingual_report.get("reason")})
+
+    feedback_regression = collect_feedback_regression(run_dir)
+    if feedback_regression["status"] == "FAILED":
+        failures.append(
+            {
+                "gate": "reader_feedback_regression_open",
+                "ledger": feedback_regression.get("ledger"),
+                "feedback_files": feedback_regression.get("feedback_files", []),
+                "open_defects": feedback_regression.get("open_defects", []),
+                "missing_ledger": feedback_regression.get("missing_ledger", False),
+            }
+        )
+
     status = "PASSED" if not failures else "FAILED"
     next_action = (
         "main can proceed to delivery gate"
@@ -168,6 +264,8 @@ def run_gate(run_dir: Path, min_artifact_bytes: int) -> dict[str, Any]:
         "warnings": warnings,
         "sources_checked": sources,
         "artifacts_checked": checked_artifacts,
+        "bilingual_integrity": bilingual_report,
+        "feedback_regression": feedback_regression,
         "next_action": next_action,
     }
 

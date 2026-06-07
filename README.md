@@ -167,7 +167,10 @@ Windows
         |   `-- README.md
         `-- translation-agent/
             |-- translation_handoff.py
-            `-- translation_artifact_gate.py
+            |-- translation_task_entry.py
+            |-- translation_artifact_gate.py
+            |-- translation_acceptance_gate.py
+            `-- translation_bilingual_integrity.py
 ```
 
 真正的 Codex skill 仍然是：

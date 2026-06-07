@@ -259,6 +259,8 @@ Codex may be able to infer and run the right install commands from the current e
    - Explain the architecture: main/Telegram is command, oversight, and acceptance; translation agent is an isolated executor using file-based handoff and artifact gates.
    - Use `tools/translation-agent/translation_handoff.py` to create `user_request.md`, `handoff_brief.md`, `task_ledger.json`, and `acceptance_plan.json` for non-trivial tasks.
    - Use `tools/translation-agent/translation_artifact_gate.py` before accepting worker outputs.
+   - Use `tools/translation-agent/translation_acceptance_gate.py` before reporting a translation run as accepted/final.
+   - For bilingual or paragraph-by-paragraph outputs, use `tools/translation-agent/translation_bilingual_integrity.py` to block source-only/translation-only body blocks, repeated Chinese body text, or table/chart pages flattened into OCR paragraph fragments.
    - For polished bilingual PDFs, the layout workflow must happen inside translation agent/layout workflow: GLM and MiniMax each produce detailed proposals, GLM/MiniMax/GPT all participate in evaluation/discussion, and the workflow writes `layout_final_brief.md`. Main must not call GPT directly or act as the synthesizing brain.
    - For book/chapter layout, each new chapter starts on a new page.
 
@@ -1012,7 +1014,10 @@ Bundled public contract and helper tools:
 docs/translation-agent-contract.md
 docs/translation-agent-isolation-protocol.md
 tools/translation-agent/translation_handoff.py
+tools/translation-agent/translation_task_entry.py
 tools/translation-agent/translation_artifact_gate.py
+tools/translation-agent/translation_acceptance_gate.py
+tools/translation-agent/translation_bilingual_integrity.py
 ```
 
 Architecture to explain:
@@ -1055,6 +1060,16 @@ python3 tools/translation-agent/translation_artifact_gate.py \
   --expect manifest.json \
   --expect translation.md \
   --min-bytes 20
+```
+
+Bilingual integrity gate example:
+
+```bash
+python3 tools/translation-agent/translation_bilingual_integrity.py \
+  --run-dir translation-runs/<run-id> \
+  --expect-bilingual auto \
+  --out bilingual_integrity_gate.json \
+  --md-out bilingual_integrity_gate.md
 ```
 
 ## Optional API Enhancements
